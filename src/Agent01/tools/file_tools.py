@@ -59,14 +59,18 @@ def display_path(state: RuntimeState, path: Path) -> str:
 def read_file(
     state: RuntimeState,
     file_path: str,
-    offset: int | str = 0,
-    limit: int | str = MAX_READ_LINES,
+    offset: int | str = 0, #跳过前面多少行，再开始读取
+    limit: int | str = MAX_READ_LINES, #limit 决定最多读多少行
 ) -> dict[str, Any]:
+
+    #校验
     path = resolve_workspace_path(state, file_path)
     if not path.exists():
         return {"ok": False, "error": f"file does not exist: {display_path(state, path)}"}
     if not path.is_file():
         return {"ok": False, "error": f"path is not a file: {display_path(state, path)}"}
+
+    #校验
     try:
         offset_value = int(offset)
         limit_value = int(limit)
@@ -77,14 +81,15 @@ def read_file(
     if limit_value <= 0:
         return {"ok": False, "error": "limit must be > 0"}
 
-    text = read_text_lossy(path)
-    lines = text.splitlines()
-    limit_value = min(limit_value, MAX_READ_LINES)
+    text = read_text_lossy(path) #用不同编码读文件 读完返回给text
+    lines = text.splitlines() #把文本按换行拆成列表，每一行成为一个元素
+    limit_value = min(limit_value, MAX_READ_LINES) #取两个数中较小的一个，再赋值给 limit_value 确保不超过最大读取行数
     selected = lines[offset_value : offset_value + limit_value]
-    complete = offset_value == 0 and len(selected) == len(lines)
-    state.record_read(path, complete=complete)
+    complete = offset_value == 0 and len(selected) == len(lines) #判断这一次有没有把整个文件的内容都选出来，完整返回给 Agent 全部选中 → complete = True 只选中一部分 → complete = False
+    state.record_read(path, complete=complete) 
 
-    numbered = "\n".join(f"{offset_value + idx + 1}: {line}" for idx, line in enumerate(selected))
+    numbered = "\n".join(f"{offset_value + idx + 1}: {line}" for idx, line in enumerate(selected)) #给选中的每一行加上行号，再用换行符拼成一个字符串
+    
     return {
         "ok": True,
         "path": display_path(state, path),
