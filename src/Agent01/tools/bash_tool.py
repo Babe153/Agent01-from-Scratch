@@ -82,5 +82,12 @@ def _handle_tail_command(state: RuntimeState, command: str) -> dict[str, Any] | 
         "duration_ms": 0,
     }
 
+def _looks_dangerous(command: str) -> str | None:
+    #匹配危险命令；如果匹配到，就返回对应的危险正则规则；如果没有匹配到，就返回 None
+    for pattern in DANGEROUS_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            return pattern
+    return None
+
 
 
