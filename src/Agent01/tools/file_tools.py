@@ -139,3 +139,44 @@ def write_file(state: RuntimeState, file_path: str, content: str) -> dict[str, A
         "lines": len(content.splitlines()),
         "diff": diff[:4000],
     }
+
+
+def edit_file(state: RuntimeState, file_path: str, old_text: str, new_text: str) -> dict[str, Any]:
+    path = resolve_workspace_path(state, file_path)
+    if not path.exists():
+        return {"ok": False, "error": f"file does not exist: {display_path(state, path)}"}
+
+    snapshot = state.snapshot_for(path)
+    if snapshot is None:
+        return {"ok": False, "error": "file has not been read yet. Read it before editing."}
+    if path.stat().st_mtime_ns != snapshot.mtime_ns:
+        return {"ok": False, "error": "file changed after it was read. Read it again before editing."}
+    if not old_text: #必须要告诉程序要替换哪段内容
+        return {"ok": False, "error": "old_text must not be empty"}
+
+    original = read_text_lossy(path)
+    count = original.count(old_text)
+    if count == 0:
+        return {"ok": False, "error": "old_text was not found"}
+    if count > 1:
+        return {"ok": False, "error": f"old_text matched {count} times. Provide a unique snippet."}
+
+    updated = original.replace(old_text, new_text, 1)
+    path.write_text(updated, encoding="utf-8")
+    state.record_read(path, complete=True)
+
+    diff = "\n".join(
+        difflib.unified_diff(
+            original.splitlines(),
+            updated.splitlines(),
+            fromfile=f"a/{display_path(state, path)}",
+            tofile=f"b/{display_path(state, path)}",
+            lineterm="",
+        )
+    )
+    return {
+        "ok": True,
+        "path": display_path(state, path),
+        "replacements": 1,
+        "diff": diff[:4000],
+    }
