@@ -16,7 +16,7 @@ def build_tools(state: RuntimeState) -> list[StructuredTool]:
             name="FileReadTool",
             func=lambda file_path, offset=0, limit=2000: read_file(state, file_path, offset, limit),
             #！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
-            #这里用lambda的意义是提前把state:RuntimeState塞给函数 不让llm去生成 其他参数会被llm覆盖
+            #这里用lambda的意义是提前把RuntimeState塞给函数 不让llm去生成 其他参数会被llm覆盖
             #！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
             description="Read a UTF-8 text file inside the workspace. Supports offset and limit.",
         ),
