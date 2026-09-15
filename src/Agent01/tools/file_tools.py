@@ -89,7 +89,7 @@ def read_file(
     state.record_read(path, complete=complete) 
 
     numbered = "\n".join(f"{offset_value + idx + 1}: {line}" for idx, line in enumerate(selected)) #给选中的每一行加上行号，再用换行符拼成一个字符串
-    
+
     return {
         "ok": True,
         "path": display_path(state, path),
@@ -101,3 +101,41 @@ def read_file(
     }
 
 
+def write_file(state: RuntimeState, file_path: str, content: str) -> dict[str, Any]:
+    path = resolve_workspace_path(state, file_path)
+    existed = path.exists()
+
+    if existed:
+        snapshot = state.snapshot_for(path)
+        if snapshot is None:
+            return {"ok": False, "error": "file has not been read yet. Read it before overwriting."}
+        if path.stat().st_mtime_ns != snapshot.mtime_ns:
+            #检查文件在读取之后有没有被修改
+            #path.stat().st_mtime_ns 获取文件当前的最后修改时间
+            #snapshot.mtime_ns 获取 Agent 上次读文件时记录的修改时间
+            #两者不相等则说明文件被修改过了 需要重新读一遍
+            return {"ok": False, "error": "file changed after it was read. Read it again before writing."}
+        original = read_text_lossy(path) #保存文件旧内容 便于后面diff对比更改
+    else:
+        original = ""
+
+    path.parent.mkdir(parents=True, exist_ok=True) # 自动创建所有缺失的父目录，若目录已存在则直接跳过不报错
+    path.write_text(content, encoding="utf-8") #真正写入文件 文件不存在则创建文件 文件存在则完全覆盖文件
+    state.record_read(path, complete=True)
+
+    diff = "\n".join( #生成git风格的增删差异对比输出
+        difflib.unified_diff(
+            original.splitlines(),
+            content.splitlines(),
+            fromfile=f"a/{display_path(state, path)}",
+            tofile=f"b/{display_path(state, path)}",
+            lineterm="",
+        )
+    )
+    return {
+        "ok": True,
+        "type": "update" if existed else "create",
+        "path": display_path(state, path),
+        "lines": len(content.splitlines()),
+        "diff": diff[:4000],
+    }
