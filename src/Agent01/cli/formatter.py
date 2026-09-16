@@ -24,7 +24,7 @@ def safe_secho(message: Any = "", **kwargs: Any) -> None:
     try:
         typer.secho(text, **kwargs)
     except UnicodeEncodeError:
-    3    safe = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        safe = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
         typer.secho(safe, **kwargs)
 
 def _shorten(value: Any, limit: int = 260) -> str:
