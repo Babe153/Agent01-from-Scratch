@@ -167,7 +167,7 @@ def actor_node(state: Agent01GraphState) -> dict[str, Any]:
         if not tool_calls:
             break #没叫工具就退出循环 因为可能是最终回复 任务执行完了llm就不调用工具了
         for call in tool_calls: #遍历调用的每个工具
-            writer({"type": "tool_call", "name": call.get("name"), "args": call.get("args", {})})
+            writer({"type": "tool_call", "name": call.get("name"), "args": call.get("args", {})})                  #这里是怎么把call写成字典的 一次一个tool吗
             tool_result, todos = _execute_actor_tool(runtime, todos, call) #------------------------------------------------------------------------------------------------------
             writer(_tool_result_event(tool_result)) #------------------------------------------------------------------------------------------------------
             if call.get("name") == "TodoUpdateTool":
@@ -200,8 +200,36 @@ def actor_node(state: Agent01GraphState) -> dict[str, Any]:
     }
 
 def _build_todo_update_tool(todos: list[dict[str, str]]) -> StructuredTool:
+    #把 update_todo() 包装成一个模型可调用的工具
     return StructuredTool.from_function(
         name="TodoUpdateTool",
         func=lambda todo_id, status, note="": update_todo(todos, todo_id, status, note),
         description="Update one existing todo status. Args: todo_id, status, optional note.",
     )
+
+def _execute_actor_tool(runtime: RuntimeState, todos: list[dict[str, str]], call: dict[str, Any]):
+    #真正开始执行actor的工具
+    from langchain_core.messages import ToolMessage
+
+    #获取工具名和参数
+    name = call["name"]
+    args = call.get("args") or {}
+
+    if name == "TodoUpdateTool":
+        result = update_todo(todos, args.get("todo_id", ""), args.get("status", ""), args.get("note", ""))
+        if result.get("ok"):
+            todos = result["todos"]
+    else:
+        tools = {tool.name: tool for tool in build_tools(runtime)}
+        tool = tools.get(name)
+        if tool is None:
+            result = {"ok": False, "error": f"unknown tool: {name}"}
+        else:
+            try:
+                result = tool.invoke(args)
+            except Exception as exc:  # Keep tool errors inside the agent loop.
+                result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return ToolMessage(content=json.dumps(result, ensure_ascii=False), name=name, tool_call_id=call["id"]), todos
+
+
+
