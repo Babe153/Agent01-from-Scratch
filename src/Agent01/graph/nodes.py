@@ -107,7 +107,7 @@ def planner_node(state: Agent01GraphState) -> dict[str, Any]:
     acceptance_criteria = [
         str(item) for item in parsed.get("acceptance_criteria") or _default_plan(task)["acceptance_criteria"]
     ]
-    verification_commands = _verification_commands_for_task(task, parsed)
+    verification_commands = _verification_commands_for_task(task, parsed) #------------------------------------------------------------------------------------------------------
     todo_result = write_todos(todos, acceptance_criteria, verification_commands)
 
     return { #return 返回给 LangGraph，由它更新工作流的 state
@@ -123,7 +123,7 @@ def actor_node(state: Agent01GraphState) -> dict[str, Any]:
     runtime = state["runtime"] #获取到RuntimeState 从而得到工作区路径以及文件相关信息
     todos = [dict(todo) for todo in state.get("todos", [])] #得到计划步骤
     model = create_model()
-    actor_tools = build_tools(runtime) + [_build_todo_update_tool(todos)] #创建并组合 actor 可以使用的工具列表
+    actor_tools = build_tools(runtime) + [_build_todo_update_tool(todos)] #创建并组合 actor 可以使用的工具列表  #------------------------------------------------------------------------------------------------------
     actor = model.bind_tools(actor_tools) #绑定工具到模型
     todo_text = "\n".join(
         f"- {todo['id']} [{todo['status']}] {todo['content']}" for todo in todos #把 todos 列表转换成一段多行文本，方便放进提示词给模型阅读。
@@ -149,7 +149,7 @@ def actor_node(state: Agent01GraphState) -> dict[str, Any]:
     ]
 
     produced_messages = []
-    writer = _get_writer()
+    writer = _get_writer() #------------------------------------------------------------------------------------------------------
     writer(
         {
             "type": "plan_snapshot",
@@ -161,15 +161,15 @@ def actor_node(state: Agent01GraphState) -> dict[str, Any]:
     )
     for _ in range(10):
         response = actor.invoke(messages)
-        produced_messages.append(response)
-        messages.append(response)
-        tool_calls = getattr(response, "tool_calls", None) or []
+        produced_messages.append(response) #写入信息
+        messages.append(response) #加入状态信息 
+        tool_calls = getattr(response, "tool_calls", None) or [] #看看叫没叫工具 叫了什么工具
         if not tool_calls:
-            break
-        for call in tool_calls:
+            break #没叫工具就退出循环 因为可能是最终回复 任务执行完了llm就不调用工具了
+        for call in tool_calls: #遍历调用的每个工具
             writer({"type": "tool_call", "name": call.get("name"), "args": call.get("args", {})})
-            tool_result, todos = _execute_actor_tool(runtime, todos, call)
-            writer(_tool_result_event(tool_result))
+            tool_result, todos = _execute_actor_tool(runtime, todos, call) #------------------------------------------------------------------------------------------------------
+            writer(_tool_result_event(tool_result)) #------------------------------------------------------------------------------------------------------
             if call.get("name") == "TodoUpdateTool":
                 writer(
                     {
@@ -198,3 +198,10 @@ def actor_node(state: Agent01GraphState) -> dict[str, Any]:
         "todos": todos or state.get("todos", []),
         "last_actor_summary": summary,
     }
+
+def _build_todo_update_tool(todos: list[dict[str, str]]) -> StructuredTool:
+    return StructuredTool.from_function(
+        name="TodoUpdateTool",
+        func=lambda todo_id, status, note="": update_todo(todos, todo_id, status, note),
+        description="Update one existing todo status. Args: todo_id, status, optional note.",
+    )
