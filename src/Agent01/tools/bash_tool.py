@@ -33,6 +33,14 @@ def _normalize_command(command: str) -> str:
     if os.name == "nt":
         #判断系统是不是Windows #Windows：os.name == "nt" #Linux/macOS：os.name == "posix"
         normalized = re.sub(r"^\s*python3(\.exe)?\b", "python", command, count=1, flags=re.IGNORECASE)
+        normalized = re.sub(
+            r"^\s*cd\s+(?:/workspace|workspace|\.?/workspace|\.Agent01orkspace)\s*(?:&&|&)\s*",
+            "",
+            normalized,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        normalized = re.sub(r"^\s*pwd\s*$", "cd", normalized, count=1, flags=re.IGNORECASE)
         normalized = re.sub(r"\bls\s+-la\b", "dir", normalized)
         normalized = re.sub(r"\bls\b", "dir", normalized)
         normalized = re.sub(r"\bcat\s+([^\s|&<>]+)", r"type \1", normalized)
@@ -82,12 +90,39 @@ def _handle_tail_command(state: RuntimeState, command: str) -> dict[str, Any] | 
         "duration_ms": 0,
     }
 
+def _handle_workspace_query(state: RuntimeState, command: str) -> dict[str, Any] | None:
+    #直接回答工作目录查询 如果命令只是 cd 或 pwd，就直接返回工作区路径，不启动子进程执行命令。
+    #如果不是这类命令 就返回None
+    if not re.fullmatch(r"\s*(?:cd|pwd)\s*", command, flags=re.IGNORECASE):
+        return None
+    return {
+        "ok": True,
+        "timed_out": False,
+        "command": command.strip() or "cd",
+        "exit_code": 0,
+        "stdout": f"{state.workspace}\n",
+        "stderr": "",
+        "duration_ms": 0,
+    }
+
 def _looks_dangerous(command: str) -> str | None:
     #匹配危险命令；如果匹配到，就返回对应的危险正则规则；如果没有匹配到，就返回 None
     for pattern in DANGEROUS_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
             return pattern
     return None
+
+def _decode_output(output: bytes | str | None) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    for encoding in ("utf-8", "gbk", "mbcs"):
+        try:
+            return output.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return output.decode("utf-8", errors="replace")
 
 
 def run_bash(state: RuntimeState, command: str, timeout_seconds: int | str | float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
@@ -107,6 +142,10 @@ def run_bash(state: RuntimeState, command: str, timeout_seconds: int | str | flo
 
     handled = _handle_tail_command(state, normalized_command)
     #处理tail命令
+    if handled is not None:
+        return handled
+
+    handled = _handle_workspace_query(state, normalized_command)
     if handled is not None:
         return handled
 
@@ -130,9 +169,9 @@ def run_bash(state: RuntimeState, command: str, timeout_seconds: int | str | flo
             normalized_command,
             cwd=state.workspace, #指定命令从当前 Agent工作区开始执行
             shell=True, #通过系统 Shell执行
-            text=True, #让 stdout 和 stderr 返回字符串，而不是字节
-            encoding="utf-8", #指定编码
-            errors="replace", #无法解码时进行替换
+           #text=True, #让 stdout 和 stderr 返回字符串，而不是字节
+           #encoding="utf-8", #指定编码
+           #errors="replace", #无法解码时进行替换
             capture_output=True, # 捕获命令的正常输出和错误输出 执行结束后，可以通过：completed.stdout、completed.stderr获得内容
             timeout=timeout, #设置超时时间
             env=env, #给子进程传递环境变量
@@ -143,13 +182,15 @@ def run_bash(state: RuntimeState, command: str, timeout_seconds: int | str | flo
             "ok": False,
             "timed_out": True,
             "exit_code": None,
-            "stdout": (exc.stdout or "")[:MAX_OUTPUT_CHARS],
-            "stderr": (exc.stderr or "")[:MAX_OUTPUT_CHARS],
+            "stdout": _decode_output(exc.stdout)[:MAX_OUTPUT_CHARS],
+            "stderr": _decode_output(exc.stderr)[:MAX_OUTPUT_CHARS],
             "duration_ms": round((time.perf_counter() - started) * 1000), #减去开始时间获得duration
         }
 
-    stdout = completed.stdout[:MAX_OUTPUT_CHARS] #获取正常输出，并只保留前 6000 个字符
-    stderr = completed.stderr[:MAX_OUTPUT_CHARS] #获取错误输出，同样只保留前 6000 个字符
+   #stdout = completed.stdout[:MAX_OUTPUT_CHARS] #获取正常输出，并只保留前 6000 个字符
+   #stderr = completed.stderr[:MAX_OUTPUT_CHARS] #获取错误输出，同样只保留前 6000 个字符
+    stdout = _decode_output(completed.stdout)[:MAX_OUTPUT_CHARS]
+    stderr = _decode_output(completed.stderr)[:MAX_OUTPUT_CHARS]
     return {
         "ok": completed.returncode == 0, #判断退出码是否为0 如果为0为true 不为0为false
         "timed_out": False,
