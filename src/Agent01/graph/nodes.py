@@ -107,7 +107,7 @@ def planner_node(state: Agent01GraphState) -> dict[str, Any]:
     acceptance_criteria = [
         str(item) for item in parsed.get("acceptance_criteria") or _default_plan(task)["acceptance_criteria"]
     ]
-    verification_commands = _verification_commands_for_task(task, parsed) #------------------------------------------------------------------------------------------------------
+    verification_commands = _verification_commands_for_task(task, parsed) #------------------------------ _verification_commands_for_task(task, parsed)------------------------------------------------------------------------
     todo_result = write_todos(todos, acceptance_criteria, verification_commands)
 
     return { #return 返回给 LangGraph，由它更新工作流的 state
@@ -123,7 +123,7 @@ def actor_node(state: Agent01GraphState) -> dict[str, Any]:
     runtime = state["runtime"] #获取到RuntimeState 从而得到工作区路径以及文件相关信息
     todos = [dict(todo) for todo in state.get("todos", [])] #得到计划步骤
     model = create_model()
-    actor_tools = build_tools(runtime) + [_build_todo_update_tool(todos)] #创建并组合 actor 可以使用的工具列表  #------------------------------------------------------------------------------------------------------
+    actor_tools = build_tools(runtime) + [_build_todo_update_tool(todos)] #创建并组合 actor 可以使用的工具列表  #--------------------------------_build_todo_update_tool(todos)----------------------------------------------------------------------
     actor = model.bind_tools(actor_tools) #绑定工具到模型
     todo_text = "\n".join(
         f"- {todo['id']} [{todo['status']}] {todo['content']}" for todo in todos #把 todos 列表转换成一段多行文本，方便放进提示词给模型阅读。
@@ -149,7 +149,7 @@ def actor_node(state: Agent01GraphState) -> dict[str, Any]:
     ]
 
     produced_messages = []
-    writer = _get_writer() #------------------------------------------------------------------------------------------------------
+    writer = _get_writer() #-------------------------------------------------------_get_writer()-----------------------------------------------
     writer(
         {
             "type": "plan_snapshot",
@@ -167,9 +167,9 @@ def actor_node(state: Agent01GraphState) -> dict[str, Any]:
         if not tool_calls:
             break #没叫工具就退出循环 因为可能是最终回复 任务执行完了llm就不调用工具了
         for call in tool_calls: #遍历调用的每个工具
-            writer({"type": "tool_call", "name": call.get("name"), "args": call.get("args", {})})                  #这里是怎么把call写成字典的 一次一个tool吗
-            tool_result, todos = _execute_actor_tool(runtime, todos, call) #------------------------------------------------------------------------------------------------------
-            writer(_tool_result_event(tool_result)) #------------------------------------------------------------------------------------------------------
+            writer({"type": "tool_call", "name": call.get("name"), "args": call.get("args", {})})
+            tool_result, todos = _execute_actor_tool(runtime, todos, call) #------------------------------------------------_execute_actor_tool(runtime, todos, call)------------------------------------------------------
+            writer(_tool_result_event(tool_result)) #--------------------------------------------_tool_result_event(tool_result)----------------------------------------------------------
             if call.get("name") == "TodoUpdateTool":
                 writer(
                     {
@@ -230,6 +230,113 @@ def _execute_actor_tool(runtime: RuntimeState, todos: list[dict[str, str]], call
             except Exception as exc:  # Keep tool errors inside the agent loop.
                 result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     return ToolMessage(content=json.dumps(result, ensure_ascii=False), name=name, tool_call_id=call["id"]), todos
+
+def _tool_result_event(tool_message) -> dict[str, Any]:
+    #输出工具的结果
+    try:
+        parsed = json.loads(tool_message.content)
+    except json.JSONDecodeError:
+        parsed = tool_message.content
+    return {"type": "tool_result", "name": tool_message.name, "result": parsed}
+
+def _get_writer():
+    try:
+        return get_stream_writer() #LangGraph 提供的、用来获取“自定义事件发送函数”的函数
+    except RuntimeError:
+        return lambda _: None
+
+def _verification_commands_for_task(task: str, parsed: dict[str, Any]) -> list[str]:
+    #私货 刻意展示一下生命游戏生成效果
+    if "生命游戏" in task or "Game of Life" in task or "Conway" in task:
+        return DEFAULT_GAME_OF_LIFE_COMMANDS
+    return [str(item) for item in parsed.get("verification_commands") or _default_plan(task)["verification_commands"]]
+
+
+def verifier_node(state: Agent01GraphState) -> dict[str, Any]:
+    runtime = state["runtime"]
+    writer = _get_writer()
+    todos = [dict(todo) for todo in state.get("todos", [])]
+    writer(
+        {
+            "type": "plan_snapshot",
+            "node": "verifier",
+            "plan_summary": state.get("plan_summary", ""),
+            "todos": todos,
+            "verification_commands": state.get("verification_commands", []),
+        }
+    )
+    results: list[VerificationResult] = []
+    for command in state.get("verification_commands", []):
+        result = run_bash(runtime, command, timeout_seconds=60)
+        results.append(
+            {
+                "command": command,
+                "ok": bool(result.get("ok")),
+                "exit_code": result.get("exit_code"),
+                "stdout": str(result.get("stdout", "")),
+                "stderr": str(result.get("stderr", "")),
+            }
+        )
+    passed = bool(results) and all(result["ok"] for result in results)
+    attempts = state.get("attempts", 0) + 1
+    last_error = ""
+    if not passed:
+        failed = next((result for result in results if not result["ok"]), results[-1] if results else None)
+        if failed:
+            last_error = (
+                f"Verifier command failed: {failed['command']}\n"
+                f"exit_code={failed['exit_code']}\n"
+                f"stdout:\n{failed['stdout'][-1200:]}\n"
+                f"stderr:\n{failed['stderr'][-1200:]}"
+            )
+    else:
+        todos = [
+            {
+                **todo,
+                "status": "completed" if todo.get("status") != "blocked" else todo.get("status", "blocked"),
+                "note": todo.get("note") or "verified",
+            }
+            for todo in todos
+        ]
+        writer(
+            {
+                "type": "todo_update",
+                "plan_summary": state.get("plan_summary", ""),
+                "todos": todos,
+                "verification_commands": state.get("verification_commands", []),
+            }
+        )
+    return {
+        "verification_results": results,
+        "passed": passed,
+        "attempts": attempts,
+        "last_error": last_error,
+        "todos": todos,
+    }
+
+def verifier_route(state: Agent01GraphState) -> str:
+    #路由到下一个节点
+    if state.get("passed"):
+        return "final"
+    if state.get("attempts", 0) >= state.get("max_attempts", 3):
+        return "final"
+    return "planner"
+
+def final_node(state: Agent01GraphState) -> dict[str, Any]:
+    #输出最终结果
+    status = "PASSED" if state.get("passed") else "FAILED"
+    commands = "\n".join(
+        f"- {result['command']} -> exit {result['exit_code']}" for result in state.get("verification_results", [])
+    )
+    todos = "\n".join(f"- [{todo['status']}] {todo['content']}" for todo in state.get("todos", []))
+    final_answer = (
+        f"LangGraph workflow finished: {status}\n\n"
+        f"Plan: {state.get('plan_summary', '')}\n\n"
+        f"Todos:\n{todos}\n\n"
+        f"Verification:\n{commands}\n\n"
+        f"Actor summary:\n{state.get('last_actor_summary', '')}"
+    )
+    return {"final_answer": final_answer}
 
 
 
