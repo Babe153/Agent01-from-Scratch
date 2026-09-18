@@ -64,7 +64,10 @@ def read_file(
 ) -> dict[str, Any]:
 
     #校验
-    path = resolve_workspace_path(state, file_path)
+    try:
+        path = resolve_workspace_path(state, file_path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     if not path.exists():
         return {"ok": False, "error": f"file does not exist: {display_path(state, path)}"}
     if not path.is_file():
@@ -102,7 +105,10 @@ def read_file(
 
 
 def write_file(state: RuntimeState, file_path: str, content: str) -> dict[str, Any]:
-    path = resolve_workspace_path(state, file_path)
+    try:
+        path = resolve_workspace_path(state, file_path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     existed = path.exists()
 
     if existed:
@@ -142,7 +148,10 @@ def write_file(state: RuntimeState, file_path: str, content: str) -> dict[str, A
 
 
 def edit_file(state: RuntimeState, file_path: str, old_text: str, new_text: str) -> dict[str, Any]:
-    path = resolve_workspace_path(state, file_path)
+    try:
+        path = resolve_workspace_path(state, file_path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     if not path.exists():
         return {"ok": False, "error": f"file does not exist: {display_path(state, path)}"}
 
