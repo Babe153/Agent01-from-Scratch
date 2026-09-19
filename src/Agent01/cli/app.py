@@ -39,6 +39,10 @@ def main(
         Path | None,
         typer.Option("--workspace", "-w", help="Workspace for generated files. Defaults to .Agent01/workspace."),
     ] = None,
+    max_attempts: Annotated[
+        int,
+        typer.Option("--max-attempts", help="Maximum planner/actor/verifier attempts before finalizing."),
+    ] = 3,
 ) -> None:
     if ctx.invoked_subcommand is not None: #ctx.invoked_subcommand 表示用户是否调用了某个子命令
         return
@@ -47,7 +51,7 @@ def main(
         safe_echo(ctx.get_help())
         raise typer.Exit()
 
-    safe_secho("Agent01 version 1: create_agent ReAct loop", fg=typer.colors.MAGENTA) #前面代码都没执行 到这里准备唤醒agent
-    for event in stream_agent_events(task, workspace=workspace):
+    safe_secho("Agent01 version 2: LangGraph planner -> actor -> verifier", fg=typer.colors.MAGENTA) #前面代码都没执行 到这里准备唤醒agent
+    for event in stream_agent_events(task, workspace=workspace, max_attempts=max_attempts):
         #event 接收每次 yield 出来的事件 每当 stream_agent_events() 执行一次： yield 某个事件 这个事件就会赋给：event
         print_event(event) #formatter里面那个方法 真正接收event然后打印出来
