@@ -34,7 +34,7 @@ def _normalize_command(command: str) -> str:
         #判断系统是不是Windows #Windows：os.name == "nt" #Linux/macOS：os.name == "posix"
         normalized = re.sub(r"^\s*python3(\.exe)?\b", "python", command, count=1, flags=re.IGNORECASE)
         normalized = re.sub(
-            r"^\s*cd\s+(?:/workspace|workspace|\.?/workspace|\.Agent01[\\/]+workspace)\s*(?:&&|&)\s*"
+            r"^\s*cd\s+(?:/workspace|workspace|\.?/workspace|\.Agent01[\\/]+workspace)\s*(?:&&|&)\s*",
             "",
             normalized,
             count=1,
