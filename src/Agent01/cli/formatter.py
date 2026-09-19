@@ -1,78 +1,185 @@
-#本质上是 CLI 的输出格式化器，不负责执行 Agent，只负责把 stream_agent_events() 持续 yield 出来的事件，整理成适合人阅读的终端输出
 from __future__ import annotations
 
+import json
 from typing import Any
 
-import typer #Typer 主要用于制作命令行程序 在这个 formatter.py 中，Typer 没有负责定义命令，主要负责向终端输出内容
+from rich import box #导入 Rich 提供的边框样式
+from rich.console import Console # 导入 Console 类，它是 Rich 的终端输出接口
+from rich.panel import Panel # 导入面板组件，用于给内容加上边框和标题
+from rich.table import Table #导入表格组件，可以添加列和行
+from rich.text import Text #导入带样式的文本组件
 
-def safe_echo(message: Any = "", **kwargs: Any) -> None:
-    # kwargs 是 keyword arguments（关键字参数）的缩写。 前面的两个星号 ** 表示：收集调用函数时额外传入的所有“参数名=参数值”，并保存成一个字典。
-    # 接收消息及任意额外输出参数，并将这些参数原样转交给 typer.echo
-    text = str(message)
-    try:
-        typer.echo(text, **kwargs) #尝试正常输出 调用typer.echo() 可以将text输出到终端
-    except UnicodeEncodeError:
-        safe = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
-        #.encode()先把字符串编码成 UTF-8 字节。如果遇到无法编码的异常字符，就使用替代字符代替
-        #.decode()再把 UTF-8 字节解码回 Python 字符串。如果遇到无法解码的数据，同样使用替代字符。
-        typer.echo(safe, **kwargs) #再次尝试输出
+console = Console() #创建一个 Console 实例，命名为 console
 
-    
+STATUS_SYMBOLS = {
+    "pending": "[ ]",
+    "in_progress": "[>]",
+    "completed": "[x]",
+    "blocked": "[!]",
+}
+
+STATUS_STYLES = {
+    "pending": "dim",
+    "in_progress": "bold yellow",
+    "completed": "bold green",
+    "blocked": "bold red",
+}
+
+def safe_echo(message: Any = "", **_: Any) -> None:
+    #不主动指定样式
+    console.print(str(message))
+
 def safe_secho(message: Any = "", **kwargs: Any) -> None:
-    #safe_secho() 和 safe_echo() 的逻辑完全一样，唯一区别是使用了 typer.secho()，因此可以设置终端文字的颜色和样式。typer.echo()：普通输出 typer.secho()：带样式输出，secho 可以理解为 styled echo
-    text = str(message)
-    try:
-        typer.secho(text, **kwargs)
-    except UnicodeEncodeError:
-        safe = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
-        typer.secho(safe, **kwargs)
+    #允许调用方传入颜色或样式
+    color = kwargs.get("fg") or kwargs.get("style")
+    console.print(str(message), style=color)
 
 def _shorten(value: Any, limit: int = 260) -> str:
-    #按照 Python 命名习惯，表示这是模块内部使用的辅助函数，不希望被其他模块当成主要接口使用。
-    text = str(value)
+    #太长的信息可以不全部输出
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
     if len(text) <= limit:
         return text
-    return text[: limit - 3] + "..."#python
+    return text[: limit - 3] + "..."
 
 def print_event(event: dict[str, Any]) -> None:
-    #真正的把agent输出的各类event打印出来
     event_type = event.get("type")
     if event_type == "workspace":
-        #如果event是workspace 打印出路径
-        safe_secho(f"workspace: {event['path']}", fg=typer.colors.BLUE)
+        console.print(Panel(str(event["path"]), title="Workspace", border_style="blue", box=box.ROUNDED))
         return
-
-    if event_type != "agent_event":
-        #如果event类型不是agent event 说明这个event或者有问题或者无价值 所以用shorten打印出一部分即可
-        safe_echo(_shorten(event))
+    if event_type == "custom_event":
+        print_custom_event(event["event"])
         return
+    if event_type == "graph_event":
+        print_graph_event(event["event"])
+        return
+    console.print(_shorten(event))
 
-    payload = event["event"] #把具体event赋值给payload
+def print_custom_event(event: dict[str, Any]) -> None:
+    event_type = event.get("type")
+    if event_type == "plan_snapshot":
+        render_plan(event, title=f"Plan Snapshot · {event.get('node', 'graph')}")
+        return
+    if event_type == "todo_update":
+        render_plan(event, title="Todo Updated", border_style="yellow")
+        return
+    if event_type == "tool_call":
+        console.print(
+            Panel(
+                _format_args(event.get("args", {})),
+                title=f"Tool Call · {event.get('name')}",
+                border_style="magenta",
+                box=box.ROUNDED,
+            )
+        )
+        return
+    if event_type == "tool_result":
+        result = event.get("result")
+        style = "green"
+        if isinstance(result, dict) and result.get("ok") is False:
+            style = "red"
+        console.print(
+            Panel(
+                _format_tool_result(result),
+                title=f"Tool Result · {event.get('name')}",
+                border_style=style,
+                box=box.ROUNDED,
+            )
+        )
+        return
+    console.print(Panel(_shorten(event, 1000), title="Event", box=box.ROUNDED))
+
+def print_graph_event(payload: dict[str, Any]) -> None:
     if not isinstance(payload, dict):
-        #如果这个event不是字典 就打印出一部分即可 因为或许异常或许无价值
-        safe_echo(_shorten(payload))
+        console.print(_shorten(payload))
         return
 
     for node, update in payload.items():
-        #node update是自定义名称 代表langgraph的执行节点与节点更新的信息
-        safe_secho(f"\n[{node}]", fg=typer.colors.CYAN) #打印出节点node名称 用青色
-        messages = update.get("messages") if isinstance(update, dict) else None #获取update的messages信息 如果update不是字典(which means没有messages) 就赋值None
-        if not messages:
-            safe_echo(_shorten(update))
-            continue #如果没有messages continue处理下个节点的信息
-        for message in messages:
-            tool_calls = getattr(message, "tool_calls", None) #拿到tool_calls全部信息 没有就是None
-            name = getattr(message, "name", None) #拿到name全部信息 没有就是None
-            content = getattr(message, "content", "") #拿到content全部信息 没有就是None
+        if not isinstance(update, dict):
+            console.print(Panel(_shorten(update), title=str(node), box=box.ROUNDED))
+            continue
+        if node == "planner":
+            render_plan(update, title="Planner", border_style="cyan")
+        elif node == "actor":
+            summary = update.get("last_actor_summary")
+            if summary:
+                console.print(Panel(_shorten(summary, 1200), title="Actor Summary", border_style="cyan"))
+        elif node == "verifier":
+            render_verifier(update)
+        elif node == "final":
+            render_final(update)
+        else:
+            console.print(Panel(_shorten(update, 1200), title=str(node), box=box.ROUNDED))
 
-            if tool_calls: #如果拿到的是tool_calls
-                for call in tool_calls:
-                    safe_secho(f"tool call -> {call.get('name')}", fg=typer.colors.YELLOW)
-                    safe_echo(_shorten(call.get("args", {}))) #打印出所有tool的名字和参数
+def render_plan(update: dict[str, Any], *, title: str, border_style: str = "cyan") -> None:
+    plan = update.get("plan_summary", "")
+    todos = update.get("todos", [])
+    commands = update.get("verification_commands", [])
 
-            elif name: #如果拿到的是name 如果消息包含 name，通常说明它是某个工具返回的 ToolMessage
-                safe_secho(f"tool result <- {name}", fg=typer.colors.GREEN)
-                safe_echo(_shorten(content, 900)) #打印出name的名字 和内容 name通常表示“这条工具结果消息来自哪个工具” 内容通常是是否通过 content='{"ok": true, "content": "Hello"}'
+    table = Table(box=box.SIMPLE_HEAVY, show_header=True, header_style="bold")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("State", no_wrap=True)
+    table.add_column("Todo")
+    table.add_column("Note", style="dim")
+    for todo in todos:
+        status = todo.get("status", "pending")
+        table.add_row(
+            todo.get("id", ""),
+            Text(STATUS_SYMBOLS.get(status, "[?]"), style=STATUS_STYLES.get(status, "")),
+            todo.get("content", ""),
+            todo.get("note", ""),
+        )
 
-            elif content: #如果拿到的是content (如果没有工具调用和工具名称，但包含文字内容)
-                safe_echo(_shorten(content, 1200)) #可能是最终输出 因为没有toolcall内容 打印模型的文字回复，最多显示 1200 个字符
+    command_text = "\n".join(f"  - {command}" for command in commands)
+    body = Table.grid(expand=True)
+    if plan:
+        body.add_row(Text(plan, style="bold"))
+    if todos:
+        body.add_row(table)
+    if commands:
+        body.add_row(Text("Verifier commands\n" + command_text, style="green"))
+    console.print(Panel(body, title=title, border_style=border_style, box=box.ROUNDED))
+
+def render_verifier(update: dict[str, Any]) -> None:
+    table = Table(box=box.SIMPLE_HEAVY, header_style="bold")
+    table.add_column("Command")
+    table.add_column("Exit", justify="right")
+    table.add_column("Status")
+    table.add_column("Output")
+    for result in update.get("verification_results", []):
+        ok = bool(result.get("ok"))
+        status = Text("PASS" if ok else "FAIL", style="bold green" if ok else "bold red")
+        output = result.get("stdout") or result.get("stderr") or ""
+        table.add_row(
+            result.get("command", ""),
+            str(result.get("exit_code")),
+            status,
+            _shorten(output, 240),
+        )
+    footer = f"passed={update.get('passed')} | attempts={update.get('attempts')}"
+    panel_grid = Table.grid(expand=True)
+    panel_grid.add_row(table)
+    panel_grid.add_row(Text(footer, style="yellow"))
+    console.print(Panel(panel_grid, title="Verifier", border_style="green" if update.get("passed") else "red"))
+
+def render_final(update: dict[str, Any]) -> None:
+    answer = update.get("final_answer", "")
+    style = "green" if "PASSED" in answer else "red"
+    console.print(Panel(_shorten(answer, 2000), title="Final", border_style=style, box=box.ROUNDED))
+
+def _format_args(args: Any) -> str:
+    return _shorten(args, 900)
+
+def _format_tool_result(result: Any) -> str:
+    if not isinstance(result, dict):
+        return _shorten(result, 900)
+    keys = ["ok", "type", "path", "exit_code", "timed_out", "duration_ms", "error"]
+    lines = [f"{key}: {result[key]}" for key in keys if key in result]
+    if "stdout" in result and result["stdout"]:
+        lines.append("stdout:\n" + _shorten(result["stdout"], 500))
+    if "stderr" in result and result["stderr"]:
+        lines.append("stderr:\n" + _shorten(result["stderr"], 500))
+    if "todos" in result:
+        lines.append(f"todos: {len(result['todos'])} item(s)")
+    if not lines:
+        lines.append(_shorten(result, 900))
+    return "\n".join(lines)
