@@ -29,6 +29,32 @@ class VerificationResult(TypedDict): #定义一种“固定结构的字典类型
     stdout: str
     stderr: str
 
+class SourceItem(TypedDict, total=False):
+    title: str
+    url: str
+    content: str
+    score: float
+
+class AgentHandoff(TypedDict, total=False):
+    from_agent: str
+    to_agent: str
+    instruction: str
+    result: str
+
+class VerificationCheck(TypedDict, total=False):
+    name: str
+    passed: bool
+    detail: str
+
+class CompressionEvent(TypedDict, total=False):
+    before_tokens: int
+    after_tokens: int
+    removed_messages: int
+    summary: str
+    next_node: str
+
+
+
 class Agent01GraphState(TypedDict, total=False): #total=False 这表示下面声明的字段不要求同时存在。
     task: str #保存用户交给 Agent 的原始任务
     runtime: RuntimeState #RuntimeState 管工作区和文件操作安全
@@ -43,5 +69,19 @@ class Agent01GraphState(TypedDict, total=False): #total=False 这表示下面声
     max_attempts: int #表示最多允许尝试多少次
     final_answer: str #保存最终准备返回给用户的答案
     last_actor_summary: str #保存最近一个执行节点完成了什么
+
+    research_notes: str
+    sources: list[SourceItem]
+    agent_handoffs: list[AgentHandoff]
+    code_agent_summary: str
+    verifier_summary: str
+    verification_checks: list[VerificationCheck]
+    context_summary: str
+    context_token_count: int
+    context_token_limit: int
+    context_should_compress: bool
+    context_next_node: str
+    compression_events: list[CompressionEvent]
+    
     last_error: str #保存最近一次发生的错误
     metadata: dict[str, Any] #用于保存不适合单独定义成字段的附加数据
