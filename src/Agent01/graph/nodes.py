@@ -275,10 +275,528 @@ def context_compressor_node(state: Agent01GraphState) -> dict[str, Any]:
 def context_compressor_route(state: Agent01GraphState) -> str:
     return state.get("context_next_node") or "verifier"
 
-def verifier_route(state: MokioGraphState) -> str:
+def verifier_route(state: Agent01GraphState) -> str:
     if state.get("passed"):
         return "final"
     if state.get("attempts", 0) >= state.get("max_attempts", 3):
         return "final"
     return "planner"
 
+
+def final_node(state: Agent01GraphState) -> dict[str, Any]:
+    status = "PASSED" if state.get("passed") else "FAILED"
+    checks = "\n".join(
+        f"- {check.get('name', 'check')}: {'PASS' if check.get('passed') else 'FAIL'} - {check.get('detail', '')}"
+        for check in state.get("verification_checks", [])
+    )
+    todos = "\n".join(f"- [{todo.get('status', '')}] {todo.get('content', '')}" for todo in state.get("todos", []))
+    sources = "\n".join(f"- {source.get('title', '')}: {source.get('url', '')}" for source in state.get("sources", []))
+    compression_events = state.get("compression_events", [])
+    compression_text = "(none)"
+    if compression_events:
+        latest = compression_events[-1]
+        compression_text = (
+            f"{len(compression_events)} compression(s); "
+            f"latest {latest.get('before_tokens')} -> {latest.get('after_tokens')} tokens; "
+            f"removed {latest.get('removed_messages')} message(s)"
+        )
+    final_answer = (
+        f"LangGraph MultiAgent workflow finished: {status}\n\n"
+        f"Plan: {state.get('plan_summary', '')}\n\n"
+        f"Todos:\n{todos}\n\n"
+        f"Research sources:\n{sources or '(none)'}\n\n"
+        f"Verifier:\n{state.get('verifier_summary', '')}\n\n"
+        f"Checks:\n{checks or '(none)'}\n\n"
+        f"Context compression:\n{compression_text}\n\n"
+        f"CodeAgent summary:\n{state.get('code_agent_summary') or state.get('last_actor_summary', '')}"
+    )
+    return {"final_answer": final_answer}
+
+def get_context_token_limit() -> int:
+    load_dotenv()
+    raw = os.getenv("AGENT_CONTEXT_TOKEN_LIMIT", str(DEFAULT_CONTEXT_TOKEN_LIMIT))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_CONTEXT_TOKEN_LIMIT
+    return value if value > 0 else DEFAULT_CONTEXT_TOKEN_LIMIT
+
+def estimate_context_tokens(state: Agent01GraphState) -> int:
+    messages = list(state.get("messages", []))
+    payload = _context_payload(state)
+    payload_message = HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str))
+    try:
+        model = create_model()
+        return int(model.get_num_tokens_from_messages(messages + [payload_message]))
+    except Exception:
+        text = "\n".join(_message_text(message) for message in messages)
+        text += "\n" + payload_message.content
+        return max(1, len(text) // 4)
+
+def _build_planner_tools(state: Agent01GraphState, writer) -> list[StructuredTool]:
+    return [
+        StructuredTool.from_function(
+            name="TodoWriteTool",
+            func=lambda todos, acceptance_criteria, verification_commands, plan_summary="": _todo_write_tool(
+                state, writer, todos, acceptance_criteria, verification_commands, plan_summary
+            ),
+            description=(
+                "Publish or revise plan state. Args: todos, acceptance_criteria, "
+                "verification_commands, optional plan_summary."
+            ),
+        ),
+        StructuredTool.from_function(
+            name="CallSearchAgentTool",
+            func=lambda instruction: _call_search_agent_tool(state, writer, instruction),
+            description="Delegate research work to searchAgent. Args: instruction.",
+        ),
+        StructuredTool.from_function(
+            name="CallCodeAgentTool",
+            func=lambda instruction: _call_code_agent_tool(state, writer, instruction),
+            description="Delegate implementation work to codeAgent. Args: instruction.",
+        ),
+    ]
+
+def _todo_write_tool(
+    state: Agent01GraphState,
+    writer,
+    todos: Any,
+    acceptance_criteria: Any,
+    verification_commands: Any,
+    plan_summary: str = "",
+) -> dict[str, Any]:
+    result = write_todos(todos, acceptance_criteria, verification_commands)
+    if result.get("ok"):
+        state["plan_summary"] = plan_summary or state.get("plan_summary") or "MultiAgent plan"
+        state["todos"] = _todo_items(result["todos"], existing=state.get("todos", []))
+        state["acceptance_criteria"] = result["acceptance_criteria"]
+        state["verification_commands"] = result["verification_commands"]
+        writer(
+            {
+                "type": "plan_snapshot",
+                "node": "planner",
+                "plan_summary": state.get("plan_summary", ""),
+                "todos": state.get("todos", []),
+                "verification_commands": state.get("verification_commands", []),
+                "acceptance_criteria": state.get("acceptance_criteria", []),
+            }
+        )
+    return {
+        **result,
+        "plan_summary": state.get("plan_summary", ""),
+        "todo_items": state.get("todos", []),
+    }
+
+def _call_search_agent_tool(state: Agent01GraphState, writer, instruction: str) -> dict[str, Any]:
+    writer({"type": "handoff", "from": "planner", "to": "searchAgent", "instruction": instruction})
+    result = run_search_agent(state, instruction, writer=writer)
+    existing_sources = list(state.get("sources", []))
+    state["research_notes"] = _join_notes(state.get("research_notes", ""), result.get("summary", ""))
+    state["sources"] = _dedupe_sources(existing_sources + list(result.get("sources", [])))
+    handoff = {
+        "from_agent": "planner",
+        "to_agent": "searchAgent",
+        "instruction": instruction,
+        "result": result.get("summary", ""),
+    }
+    state["agent_handoffs"] = list(state.get("agent_handoffs", [])) + [handoff]
+    writer({"type": "handoff_result", "from": "searchAgent", "to": "planner", "result": result.get("summary", "")})
+    return {
+        "ok": True,
+        "summary": result.get("summary", ""),
+        "sources": state.get("sources", []),
+        "queries": result.get("queries", []),
+    }
+
+def _call_code_agent_tool(state: Agent01GraphState, writer, instruction: str) -> dict[str, Any]:
+    writer({"type": "handoff", "from": "planner", "to": "codeAgent", "instruction": instruction})
+    result = run_code_agent(state, instruction, writer=writer)
+    state["todos"] = result.get("todos", state.get("todos", []))
+    state["code_agent_summary"] = result.get("summary", "")
+    state["last_actor_summary"] = result.get("summary", "")
+    handoff = {
+        "from_agent": "planner",
+        "to_agent": "codeAgent",
+        "instruction": instruction,
+        "result": result.get("summary", ""),
+    }
+    state["agent_handoffs"] = list(state.get("agent_handoffs", [])) + [handoff]
+    writer({"type": "handoff_result", "from": "codeAgent", "to": "planner", "result": result.get("summary", "")})
+    return {"ok": True, "summary": result.get("summary", ""), "todos": state.get("todos", [])}
+
+
+def _execute_planner_tool(state: Agent01GraphState, writer, call: dict[str, Any]) -> ToolMessage:
+    name = call.get("name", "")
+    args = call.get("args") or {}
+    writer({"type": "tool_call", "node": "planner", "name": name, "args": args})
+    tools = {tool.name: tool for tool in _build_planner_tools(state, writer)}
+    tool = tools.get(name)
+    if tool is None:
+        result = {"ok": False, "error": f"unknown tool: {name}"}
+    else:
+        try:
+            result = tool.invoke(args)
+        except Exception as exc:
+            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    tool_message = ToolMessage(
+        content=json.dumps(result, ensure_ascii=False),
+        name=name,
+        tool_call_id=call.get("id") or f"{name}-call",
+    )
+    writer(_tool_result_event(tool_message, node="planner"))
+    return tool_message
+
+
+def _execute_read_only_tool(state: Agent01GraphState, call: dict[str, Any]) -> ToolMessage:
+    name = call.get("name", "")
+    args = call.get("args") or {}
+    tools = {tool.name: tool for tool in build_read_only_tools(state["runtime"])}
+    tool = tools.get(name)
+    if tool is None:
+        result = {"ok": False, "error": f"unknown tool: {name}"}
+    else:
+        try:
+            result = tool.invoke(args)
+        except Exception as exc:
+            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return ToolMessage(
+        content=json.dumps(result, ensure_ascii=False),
+        name=name,
+        tool_call_id=call.get("id") or f"{name}-call",
+    )
+
+
+def _compress_context_with_model(state: Agent01GraphState) -> dict[str, Any]:
+    payload = {
+        "context_summary": state.get("context_summary", ""),
+        "state": _context_payload(state),
+        "messages": [_message_snapshot(message) for message in state.get("messages", [])],
+    }
+    messages = [
+        SystemMessage(content=CONTEXT_COMPRESSION_PROMPT),
+        HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str)),
+    ]
+    try:
+        response = create_model().invoke(messages)
+        parsed = _extract_json(str(response.content))
+        if parsed:
+            return parsed
+    except Exception as exc:
+        return _fallback_compression(state, error=f"{type(exc).__name__}: {exc}")
+    return _fallback_compression(state, error="compressor model did not return valid JSON")
+
+
+def _fallback_compression(state: Agent01GraphState, *, error: str = "") -> dict[str, Any]:
+    return {
+        "summary": _short_text(
+            "\n\n".join(
+                [
+                    state.get("context_summary", ""),
+                    state.get("research_notes", ""),
+                    state.get("code_agent_summary", ""),
+                    state.get("verifier_summary", ""),
+                    state.get("last_error", ""),
+                ]
+            ),
+            2400,
+        ),
+        "active_goal": state.get("task", ""),
+        "completed_work": state.get("code_agent_summary", ""),
+        "open_todos": [
+            todo.get("content", "")
+            for todo in state.get("todos", [])
+            if todo.get("status") != "completed"
+        ],
+        "important_files": _important_files_from_state(state),
+        "tool_findings": _short_text(state.get("last_error", ""), 1200),
+        "sources": [{"title": source.get("title", ""), "url": source.get("url", "")} for source in state.get("sources", [])],
+        "next_steps": state.get("context_next_node", ""),
+        "risks": error,
+    }
+
+
+def _format_compressed_context(compressed: dict[str, Any], state: Agent01GraphState) -> str:
+    payload = {
+        "type": "Agent01_context_summary",
+        "task": state.get("task", ""),
+        "plan_summary": state.get("plan_summary", ""),
+        "todos": state.get("todos", []),
+        "acceptance_criteria": state.get("acceptance_criteria", []),
+        "verification_commands": state.get("verification_commands", []),
+        "attempts": state.get("attempts", 0),
+        "passed": state.get("passed"),
+        "compression": compressed,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+
+
+def _context_payload(state: Agent01GraphState) -> dict[str, Any]:
+    return {
+        "task": state.get("task", ""),
+        "plan_summary": state.get("plan_summary", ""),
+        "todos": state.get("todos", []),
+        "acceptance_criteria": state.get("acceptance_criteria", []),
+        "verification_commands": state.get("verification_commands", []),
+        "research_notes": state.get("research_notes", ""),
+        "sources": [
+            {"title": source.get("title", ""), "url": source.get("url", "")}
+            for source in state.get("sources", [])
+        ],
+        "agent_handoffs": state.get("agent_handoffs", []),
+        "code_agent_summary": state.get("code_agent_summary", ""),
+        "verifier_summary": state.get("verifier_summary", ""),
+        "verification_checks": state.get("verification_checks", []),
+        "last_error": state.get("last_error", ""),
+        "attempts": state.get("attempts", 0),
+        "max_attempts": state.get("max_attempts", 3),
+        "context_summary": state.get("context_summary", ""),
+        "context_next_node": state.get("context_next_node", ""),
+        "compression_events": state.get("compression_events", []),
+    }
+
+
+def _message_snapshot(message: Any) -> dict[str, str]:
+    return {
+        "type": type(message).__name__,
+        "name": str(getattr(message, "name", "") or ""),
+        "content": _short_text(_message_text(message), 2000),
+    }
+
+
+def _message_text(message: Any) -> str:
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, ensure_ascii=False, default=str)
+
+
+def _important_files_from_state(state: Agent01GraphState) -> list[str]:
+    files: list[str] = []
+    for command in state.get("verification_commands", []):
+        files.extend(re.findall(r"[\w./\\-]+\.(?:py|html|css|js|json|md|txt)", command))
+    for text in [state.get("code_agent_summary", ""), state.get("last_error", "")]:
+        files.extend(re.findall(r"[\w./\\-]+\.(?:py|html|css|js|json|md|txt)", text))
+    seen: set[str] = set()
+    deduped = []
+    for item in files:
+        normalized = item.strip("\"'")
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+    return deduped
+
+
+def _planner_input(state: Agent01GraphState) -> str:
+    source_text = "\n".join(f"- {source.get('title', '')}: {source.get('url', '')}" for source in state.get("sources", []))
+    return (
+        f"Task: {state['task']}\n"
+        f"Attempt: {state.get('attempts', 0) + 1}\n\n"
+        f"Current plan: {state.get('plan_summary', '')}\n"
+        f"Todos:\n{_todos_text(state.get('todos', []))}\n\n"
+        f"Acceptance criteria:\n{_list_text(state.get('acceptance_criteria', []))}\n\n"
+        f"Verification commands:\n{_list_text(state.get('verification_commands', []))}\n\n"
+        f"Research notes:\n{state.get('research_notes', '')}\n\n"
+        f"Sources:\n{source_text}\n\n"
+        f"CodeAgent summary:\n{state.get('code_agent_summary', '')}\n\n"
+        f"Previous verifier failure:\n{state.get('last_error', '')}"
+        f"\n\nCompressed context summary, if any:\n{state.get('context_summary', '')}"
+    )
+
+
+def _verifier_input(state: Agent01GraphState) -> str:
+    source_text = "\n".join(f"- {source.get('title', '')}: {source.get('url', '')}" for source in state.get("sources", []))
+    return (
+        f"Task: {state['task']}\n\n"
+        f"Plan: {state.get('plan_summary', '')}\n\n"
+        f"Todos:\n{_todos_text(state.get('todos', []))}\n\n"
+        f"Acceptance criteria:\n{_list_text(state.get('acceptance_criteria', []))}\n\n"
+        f"Verification commands:\n{_list_text(state.get('verification_commands', []))}\n\n"
+        f"Research notes:\n{state.get('research_notes', '')}\n\n"
+        f"Sources:\n{source_text}\n\n"
+        f"CodeAgent summary:\n{state.get('code_agent_summary', '')}\n\n"
+        f"Compressed context summary:\n{state.get('context_summary', '')}\n\n"
+        "Inspect the workspace with tools and return only verifier JSON."
+    )
+
+
+def _default_plan(task: str) -> dict[str, Any]:
+    if _is_amiya_task(task):
+        return {
+            "plan_summary": "Research Amiya from Arknights and build a sourced HTML character profile.",
+            "todos": AMIYA_TODOS,
+            "acceptance_criteria": AMIYA_CRITERIA,
+            "verification_commands": AMIYA_COMMANDS,
+        }
+    return {
+        "plan_summary": "Coordinate specialist agents to complete and verify the requested deliverable.",
+        "todos": DEFAULT_TODOS,
+        "acceptance_criteria": ["The requested deliverable exists.", "The verifier model confirms completion."],
+        "verification_commands": [],
+    }
+
+
+def _apply_plan(state: Agent01GraphState, plan: dict[str, Any]) -> None:
+    state["plan_summary"] = str(plan.get("plan_summary", ""))
+    state["todos"] = _todo_items([str(item) for item in plan.get("todos", [])], existing=state.get("todos", []))
+    state["acceptance_criteria"] = [str(item) for item in plan.get("acceptance_criteria", [])]
+    state["verification_commands"] = _verification_commands_for_task(state["task"], plan)
+
+
+def _verification_commands_for_task(task: str, parsed: dict[str, Any]) -> list[str]:
+    if _is_amiya_task(task):
+        return AMIYA_COMMANDS
+    return [str(item) for item in parsed.get("verification_commands") or []]
+
+
+def _todo_items(todos: list[str], *, existing: list[dict[str, Any]] | None = None) -> list[TodoItem]:
+    existing_by_content = {todo.get("content", ""): todo for todo in existing or []}
+    items: list[TodoItem] = []
+    for idx, todo in enumerate(todos, start=1):
+        previous = existing_by_content.get(todo, {})
+        items.append(
+            {
+                "id": str(previous.get("id") or f"todo-{idx}"),
+                "content": todo,
+                "status": str(previous.get("status") or "pending"),
+                "note": str(previous.get("note") or ""),
+            }
+        )
+    return items
+
+
+def _extract_json(text: str) -> dict[str, Any] | None:
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    raw = fenced.group(1) if fenced else text
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        parsed = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _tool_result_event(tool_message: ToolMessage, *, node: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(tool_message.content))
+    except json.JSONDecodeError:
+        parsed = tool_message.content
+    return {"type": "tool_result", "node": node, "name": tool_message.name, "result": parsed}
+
+
+def _tool_events_to_verification_results(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results = []
+    for event in events:
+        result = event.get("result", {})
+        if not isinstance(result, dict):
+            continue
+        results.append(
+            {
+                "command": result.get("command") or event.get("name", ""),
+                "ok": bool(result.get("ok")),
+                "exit_code": result.get("exit_code"),
+                "stdout": str(result.get("stdout", "")),
+                "stderr": str(result.get("stderr") or result.get("error", "")),
+            }
+        )
+    return results
+
+
+def _normalize_checks(raw: Any) -> list[VerificationCheck]:
+    if not isinstance(raw, list):
+        return []
+    checks: list[VerificationCheck] = []
+    for item in raw:
+        if isinstance(item, dict):
+            checks.append(
+                {
+                    "name": str(item.get("name") or "check"),
+                    "passed": bool(item.get("passed")),
+                    "detail": str(item.get("detail") or ""),
+                }
+            )
+    return checks
+
+
+def _format_verifier_error(reason: str, recommended: str, tool_events: list[dict[str, Any]]) -> str:
+    event_text = json.dumps(tool_events[-3:], ensure_ascii=False, default=str)[:1600]
+    return (
+        f"Verifier failed: {reason}\n"
+        f"Recommended next instruction: {recommended}\n"
+        f"Recent verifier tool events:\n{event_text}"
+    )
+
+
+def _join_notes(existing: str, new: str) -> str:
+    if not existing:
+        return new
+    if not new:
+        return existing
+    return existing + "\n\n" + new
+
+
+def _dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped = []
+    for source in sources:
+        url = str(source.get("url", ""))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduped.append(source)
+    return deduped
+
+
+def _trim_handoffs(handoffs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    trimmed = []
+    for handoff in handoffs[-6:]:
+        trimmed.append(
+            {
+                "from_agent": handoff.get("from_agent", ""),
+                "to_agent": handoff.get("to_agent", ""),
+                "instruction": _short_text(str(handoff.get("instruction", "")), 500),
+                "result": _short_text(str(handoff.get("result", "")), 700),
+            }
+        )
+    return trimmed
+
+
+def _short_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _last_ai_content(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, ToolMessage):
+            continue
+        content = getattr(message, "content", "")
+        if content:
+            return str(content)
+    return ""
+
+
+def _todos_text(todos: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        f"- {todo.get('id', '')} [{todo.get('status', '')}] {todo.get('content', '')} {todo.get('note', '')}".strip()
+        for todo in todos
+    )
+
+
+def _list_text(items: list[str]) -> str:
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _is_amiya_task(task: str) -> bool:
+    lowered = task.lower()
+    return "阿米娅" in task or "amiya" in lowered or "arknights" in lowered or "明日方舟" in task
+
+
+def _get_writer():
+    try:
+        return get_stream_writer()
+    except RuntimeError:
+        return lambda _: None
