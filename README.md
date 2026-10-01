@@ -4,42 +4,65 @@
 
 <h1 align="center">Agent01 · From Scratch</h1>
 
-<p align="center">逐文件阅读、重建一个 Agent，理解从工具调用到任务规划、执行与验证的完整过程。</p>
+<p align="center">逐文件阅读、重建一个 Agent，理解工具调用、任务调度与上下文管理。</p>
 
 ## 关于项目
 
-Agent01 是我的 Agent 开发学习仓库，参考 MokioClaw 项目逐步重建，并在代码中记录理解与注释。“From Scratch”指从基础模块开始学习和组装，项目使用 LangChain、LangGraph 等现有框架。
+Agent01 是我的 Agent 开发学习仓库，参考 MokioClaw 项目逐步重建，并在代码中记录理解与注释。“From Scratch”指从基础模块开始学习和组装；模型调用和工作流使用 LangChain、LangGraph 等现有框架。
 
-**当前阶段：第二阶段——基于 LangGraph 的 Plan & Execute 工作流。**
+**当前进度：第三、四阶段代码迁移完成——MultiAgent 专家分工 + Context Engineering 自动压缩。** 本阶段参考原项目提交 `7bd50cc`，该提交同时引入多 Agent 与上下文压缩。
 
-第一阶段通过 `create_agent()` 组装单个 Agent；第二阶段显式拆分规划、执行、验证和汇总，并加入 Todo 管理与失败重试。第一阶段的说明保存在 [README_stage1.md](README_stage1.md)。本阶段参考原项目提交 `897372d`。
+| 阶段 | 学习内容 | 说明 |
+| --- | --- | --- |
+| 第一阶段 | `create_agent()` 单 Agent ReAct 工具循环 | [第一阶段存档](README_stage1.md) |
+| 第二阶段 | LangGraph 规划、执行、命令验证与重试 | [第二阶段存档](README_stage2.md) |
+| 第三、四阶段 | 调度专家 Agent、模型验收、上下文监控与压缩 | 当前 README |
 
-## 工作流
+历史 README 记录当时的实现与验证情况，其中的旧入口、功能说明不代表当前代码。
+
+## 本阶段学到了什么
+
+第二阶段由 planner 生成计划，再固定进入 actor 执行。本阶段 planner 成为 supervisor：通过工具调用搜索 Agent 和编程 Agent，接收结果后继续调度。原 actor 的编程执行循环被提取到 `agents/code_agent.py`。
+
+验收也从“Python 逐条运行命令并检查退出码”升级为“模型使用工具检查产物并返回结构化结论”。工作流在 planner 和 verifier 返回后检查上下文大小，必要时调用模型生成摘要、替换旧消息，再继续原定节点。
+
+这里的多个角色使用相同模型配置，但各有提示词、输入上下文和工具集合；它们不是多个独立部署的大模型。
+
+## 工作流与角色
 
 ```text
 用户任务
-   ↓
-planner：调用模型生成计划、Todo、验收标准与验证命令
-   ↓
-actor：调用模型与工具实施计划、更新 Todo
-   ↓
-verifier：执行验证命令，收集退出码与输出
-   ├─ 未通过且还有尝试次数 → planner（带上失败信息）
-   └─ 通过或达到尝试上限 → final：汇总结果 → 结束
+    ↓
+planner / supervisor
+    ├─ TodoWriteTool：制定或更新计划
+    ├─ CallSearchAgentTool → searchAgent → 返回研究摘要与来源
+    └─ CallCodeAgentTool   → codeAgent   → 返回实现摘要与 Todo
+    ↓
+context_monitor
+    ├─ 达到阈值 → context_compressor → 原定下一节点
+    └─ 未达到阈值 ───────────────────→ 原定下一节点
+
+planner 后的下一节点：verifier
+verifier 后再次经过 context_monitor：
+    ├─ 验收失败且还有尝试次数 → planner
+    └─ 验收通过或达到尝试上限 → final → 结束
 ```
 
-| 节点 | 实现方式 | 主要产出 |
-| --- | --- | --- |
-| `planner` | 模型返回 JSON，程序解析并补充默认字段 | 计划摘要、待办、验收标准、验证命令 |
-| `actor` | 绑定工具，手动循环执行模型提出的工具调用 | 文件与命令执行结果、Todo 状态、执行摘要 |
-| `verifier` | Python 直接运行验证命令，不调用模型 | 验证结果、是否通过、失败信息、尝试次数 |
-| `final` | Python 拼接报告，不调用模型 | 最终计划、Todo、验证结果和执行摘要 |
+搜索和编程 Agent 被包装成 planner 的工具，并不是外层图中固定依次执行的两个节点；当前调用循环按顺序执行模型提出的工具请求。
 
-默认最多尝试 3 轮，验证通过后提前结束。这个次数限制的是规划、执行、验证的完整轮次；actor 每轮另外限制最多 10 次模型调用，不代表只能执行 10 个工具。
+| 角色 / 节点 | 职责 | 主要能力 |
+| --- | --- | --- |
+| `planner` | 规划任务、委派专家、根据失败信息继续安排工作 | TodoWriteTool、CallSearchAgentTool、CallCodeAgentTool |
+| `searchAgent` | 查找资料、汇总答案和来源 | Tavily WebSearchTool |
+| `codeAgent` | 创建和编辑文件、运行命令、更新待办 | 文件工具、GrepTool、BashTool、TodoUpdateTool |
+| `verifier` | 检查交付物，输出是否通过、检查项和修复建议 | FileReadTool、GrepTool、BashTool、WebSearchTool |
+| `context_monitor` | 估算上下文大小，判断是否压缩 | token 估算与条件路由 |
+| `context_compressor` | 生成恢复任务所需的摘要，缩减历史消息与部分状态 | 模型压缩、失败时的备用摘要 |
+| `final` | 汇总计划、来源、验收、压缩和实现结果 | Python 拼接报告，不调用模型 |
 
 ## 如何运行
 
-以下示例使用 Windows PowerShell，在项目根目录执行。需要 uv，项目声明 Python 3.13 或以上版本，`.python-version` 指定 3.13。
+以下命令在项目根目录的 Windows PowerShell 中执行。需要 uv 和 Python 3.13 或以上版本；uv 安装方式见 [官方安装说明](https://docs.astral.sh/uv/getting-started/installation/)。
 
 ### 1. 安装依赖
 
@@ -47,150 +70,162 @@ verifier：执行验证命令，收集退出码与输出
 uv sync
 ```
 
-uv 根据 `pyproject.toml` 和 `uv.lock` 准备项目环境。使用 `uv run` 时不需要手动激活 `.venv`。
+依赖包括 LangChain、LangGraph、Tavily、Typer 等。`uv run` 会使用项目环境，不需要手动激活 `.venv`。
 
-### 2. 配置模型
+### 2. 配置模型和搜索服务
 
-首次使用时复制配置模板；已有 `.env` 时直接编辑，不要覆盖：
+首次运行时复制模板；已经有 `.env` 时直接编辑原文件：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-填写三个必需配置项：
+填写配置：
 
 ```dotenv
-API_KEY=你的API密钥
+API_KEY=你的模型API密钥
 MODEL=你的模型名称
 BASE_URL=你的模型服务API基础地址
+TAVILY_API_KEY=你的Tavily密钥
+AGENT_CONTEXT_TOKEN_LIMIT=400000
 ```
 
-项目使用 `ChatOpenAI` 创建模型客户端，需要兼容的服务接口和支持工具调用的模型。`BASE_URL` 是 API 基础地址，不是聊天网页地址。真实密钥保存在本地 `.env`，该文件已被 Git 忽略。
+| 配置 | 用途 |
+| --- | --- |
+| `API_KEY` | 模型服务密钥，创建模型时必需 |
+| `MODEL` | 模型名称，创建模型时必需 |
+| `BASE_URL` | 模型 API 基础地址，创建模型时必需 |
+| `TAVILY_API_KEY` | 搜索工具使用的 Tavily 密钥，联网搜索任务需要配置 |
+| `AGENT_CONTEXT_TOKEN_LIMIT` | 自动压缩阈值，未配置或配置无效时默认 `400000` |
 
-### 3. 查看帮助
+模型通过 `ChatOpenAI` 调用，需要兼容的接口和支持工具调用的模型。`BASE_URL` 不是聊天网页地址。模型密钥与 Tavily 密钥来自各自服务，不能互相替代；`.env` 已被 Git 忽略。
+
+### 3. 检查入口
 
 ```powershell
 uv run Agent01 --help
 ```
 
-不提供任务时也会显示帮助，不会调用模型。
+不传任务时也会显示帮助，这一步不调用模型。
 
-### 4. 执行任务
+### 4. 运行任务
 
-先尝试一个包含明确验证要求的小任务：
+先尝试一个简单编码任务：
 
 ```powershell
-uv run Agent01 "创建 hello.py，输出 Hello, Agent01!，并添加 test_hello.py 使用 pytest 验证输出。" --max-attempts 3
+uv run Agent01 "创建 hello.py，输出 Hello, Agent01!，并运行它检查结果。"
 ```
 
-本阶段还保留了原项目的康威生命游戏演示：
+本阶段的多 Agent 演示任务：
 
 ```powershell
-uv run Agent01 "帮我用 TDD 开发一个终端版康威生命游戏，包含规则测试和非交互演示。"
+uv run Agent01 "帮我查阅明日方舟阿米娅，并编写一个 HTML 介绍人物，包含至少两个资料来源链接。"
 ```
 
-默认工作区为项目根目录下的 `.Agent01/workspace/`，运行时自动创建，多个任务会重复使用该目录。可通过参数为任务指定独立目录：
+可以观察 planner 委派搜索、编程 Agent 返回结果以及 verifier 使用工具检查的过程。模型具体调用次序取决于任务和模型输出，执行成功与否应以实际运行结果为准。
+
+默认文件输出目录为 `.Agent01/workspace/`，不同任务仍会重复使用这个目录。也可以指定工作区：
 
 ```powershell
-uv run Agent01 "创建一个计算器模块及对应的 pytest 测试。" --workspace ./demo-workspace --max-attempts 2
+uv run Agent01 "查阅阿米娅的资料并创建介绍网页。" --workspace ./demo-amiya --max-attempts 3
 ```
 
 | 参数 | 默认值 | 作用 |
 | --- | --- | --- |
 | `TASK` | 无 | 自然语言任务 |
-| `--workspace` / `-w` | `.Agent01/workspace/` | 工具操作与生成文件的工作区 |
-| `--max-attempts` | `3` | 验证失败时允许的最大尝试轮数 |
+| `--workspace` / `-w` | `.Agent01/workspace/` | 文件操作与命令执行的工作区 |
+| `--max-attempts` | `3` | 验收轮次上限，验收通过时提前结束 |
 
-以下两种方式也进入相同的 CLI：
+`--max-attempts` 不是模型请求次数。单次节点或子 Agent 内部还可能多轮调用模型和工具。
+
+其他启动方式：
 
 ```powershell
 uv run main.py "你的任务"
 uv run python -m Agent01 "你的任务"
 ```
 
+### 5. 观察自动压缩
+
+为了演示，可以临时降低当前终端的阈值：
+
+```powershell
+$env:AGENT_CONTEXT_TOKEN_LIMIT = "2000"
+uv run Agent01 "查阅阿米娅的资料并生成包含来源链接的介绍网页。"
+Remove-Item Env:AGENT_CONTEXT_TOKEN_LIMIT
+```
+
+终端会展示上下文估算、是否触发压缩，以及压缩前后的估算值。`2000` 仅用于演示，正常使用应按实际模型的上下文容量选择阈值并预留输出空间。
+
+## 上下文压缩如何工作
+
+监控节点估算图消息和相关状态的 token 数量；估算失败时使用文本长度作为粗略替代。达到阈值后，压缩节点整理任务、计划、Todo、研究结果、来源、实现摘要、验收信息与下一步，交给模型生成结构化摘要；调用或解析失败时使用备用摘要逻辑。
+
+压缩不是单纯追加总结。节点通过以下消息更新删除旧历史，再写入摘要：
+
+```python
+"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), summary_message]
+```
+
+同时更新 `context_summary`，截短部分状态文本和交接记录。后续 planner、verifier 的输入会带上摘要。
+
+该机制在外层节点之间运行，不会在子 Agent 每次模型调用前自动检查；压缩阈值和 token 估算也不保证一定避免模型窗口超限。压缩会丢失细节，需要结合实际任务观察效果。
+
 ## 状态与事件
 
-项目有两层状态，职责不同：
+- `RuntimeState`：工作区路径、文件读取记录与快照。
+- `Agent01GraphState`：任务、消息、计划、Todo、研究来源、交接记录、验收和压缩信息，其中 `runtime` 引用 `RuntimeState`。
 
-- `RuntimeState`：保存工作区路径、文件读取记录和快照，供文件及命令工具使用。
-- `Agent01GraphState`：保存任务、消息、计划、Todo、验证结果与重试次数，其中 `runtime` 字段引用 `RuntimeState`。
+节点返回的字典由 LangGraph 合并进状态。子 Agent 返回结果，由 planner 的工具包装函数挑选摘要、来源、Todo 等写回工作状态；各角色并不自动共享全部对话。
 
-节点返回需要更新的字段，由 LangGraph 合并进运行中的图状态。`messages` 使用 `add_messages` 合并；其他未指定特殊规则的字段使用新的值更新。当前没有配置 checkpoint 持久化，图状态在本次运行期间维护；生成的文件则保留在工作区。
-
-CLI 展示来自两类事件：
-
-| 流模式 | 来源 | 用途 |
-| --- | --- | --- |
-| `updates` | 节点返回的状态更新 | 展示计划、执行摘要、验证结果和最终报告 |
-| `custom` | 节点通过 `get_stream_writer()` 取得的函数发送事件 | 展示计划快照、工具调用、工具结果和 Todo 更新 |
-
-`core/agent.py` 转发事件，`cli/app.py` 接收事件，`cli/formatter.py` 使用 Rich 面板和表格显示。事件发送本身不会执行工具，也不会自动修改 Todo。
-
-## 工具
-
-| 工具 | 功能 |
-| --- | --- |
-| `FileReadTool` | 读取工作区文本，支持按行截取 |
-| `FileWriteTool` | 创建文件或整体覆盖已有文件 |
-| `FileEditTool` | 匹配旧文本并做局部替换 |
-| `GrepTool` | 按正则表达式搜索文件内容 |
-| `BashTool` | 执行开发命令，返回退出码、输出和超时信息 |
-| `TodoUpdateTool` | 根据 ID 更新待办的状态与备注 |
-
-通用工具在 `tools/registry.py` 注册；`TodoUpdateTool` 在 `graph/nodes.py` 中绑定当前待办列表后加入 actor。`tools/todo_tool.py` 提供数据规范化和更新逻辑，本阶段不会将 Todo 自动保存为 `TODO.md`。
+`writer` 是外层传入的事件发送函数。子 Agent 调用 `writer({...})` 报告工具调用、搜索结果或交接信息，LangGraph 通过 `custom` 流传出；节点状态更新则通过 `updates` 流传出。`core/agent.py` 转发两类事件，CLI 使用 Rich 面板和表格展示。
 
 ## 代码结构与阅读顺序
 
 ```text
-Agent01-from-Scratch/
-├─ src/Agent01/
-│  ├─ graph/
-│  │  ├─ state.py          # 图状态结构与消息合并规则
-│  │  ├─ workflow.py       # 注册节点、连接顺序和重试分支
-│  │  └─ nodes.py          # 规划、执行、验证、路由与汇总
-│  ├─ core/
-│  │  ├─ agent.py          # 准备初始状态，启动图并转发事件
-│  │  ├─ paths.py          # 项目根目录和工作区路径
-│  │  └─ state.py          # RuntimeState 与文件快照
-│  ├─ tools/
-│  │  ├─ registry.py       # 通用工具注册
-│  │  ├─ todo_tool.py      # Todo 数据整理与状态更新
-│  │  ├─ file_tools.py     # 读、写、编辑文件
-│  │  ├─ grep_tool.py      # 搜索文件内容
-│  │  └─ bash_tool.py      # 执行命令与处理输出
-│  ├─ prompts/
-│  │  ├─ version1.py       # 保留的第一阶段提示词
-│  │  └─ version2.py       # 第二阶段提示词
-│  ├─ providers/openai_provider.py  # 模型客户端与环境配置
-│  ├─ cli/
-│  │  ├─ app.py            # CLI 参数和事件接收
-│  │  └─ formatter.py      # Rich 终端展示
-│  └─ __main__.py          # python -m Agent01 入口
-├─ main.py                 # 脚本启动入口
-├─ pyproject.toml           # 项目配置与依赖
-├─ uv.lock                  # 依赖锁文件
-├─ .env.example             # 模型配置模板
-├─ README.md                # 当前阶段说明
-└─ README_stage1.md         # 第一阶段说明存档
+src/Agent01/
+├─ agents/
+│  ├─ search_agent.py       # 搜索 Agent 的模型与工具循环
+│  └─ code_agent.py         # 编程 Agent 的模型与工具循环
+├─ graph/
+│  ├─ state.py              # 工作流共享状态
+│  ├─ nodes.py              # 调度、验收、监控、压缩与汇总
+│  └─ workflow.py           # 节点连接与条件路由
+├─ tools/
+│  ├─ web_search_tool.py    # Tavily 搜索
+│  ├─ registry.py           # 编程与验收工具集合
+│  ├─ todo_tool.py          # Todo 数据整理与更新
+│  ├─ file_tools.py         # 文件读写与编辑
+│  ├─ grep_tool.py          # 文件内容搜索
+│  └─ bash_tool.py          # 命令执行与平台相关工具说明
+├─ prompts/
+│  ├─ version1.py           # 第一阶段提示词存档
+│  ├─ version2.py           # 第二阶段提示词存档
+│  ├─ version3.py           # 调度、搜索、编程和验收提示词
+│  └─ version4.py           # 压缩提示词
+├─ core/
+│  ├─ agent.py              # 初始化、启动工作流、转发事件
+│  ├─ paths.py              # 根目录与工作区路径
+│  └─ state.py              # RuntimeState
+├─ providers/openai_provider.py
+├─ cli/
+│  ├─ app.py                # 命令行入口
+│  └─ formatter.py          # 事件展示
+└─ __main__.py              # 模块启动入口
 ```
 
-第二阶段建议依次阅读：
+建议从 `graph/state.py` 和搜索工具开始，接着读 `version3.py`、两个子 Agent，再读 `nodes.py` 的 planner 和 verifier。最后学习 `version4.py` 与压缩相关函数，连接 `workflow.py`，理解 CLI 如何展示事件。
 
-1. `graph/state.py`：有哪些共享数据，和 `RuntimeState` 有何区别。
-2. `graph/workflow.py`：节点如何连接，何时重试或结束。
-3. `tools/todo_tool.py` 与 `prompts/version2.py`：计划数据如何组织，模型分别承担什么任务。
-4. `graph/nodes.py`：重点看 planner、actor 工具循环、verifier 和条件路由。
-5. `core/agent.py`：初始数据和两类事件如何传递。
-6. `cli/formatter.py` 与 `cli/app.py`：运行信息如何呈现在终端。
+## 当前边界与验证记录
 
-## 当前边界与验证
+本阶段仍以学习和演示为目的：
 
-第二阶段已经实现显式工作流、内存中的 Todo 管理、命令验证和失败重试；多 Agent 专家分工、上下文压缩、长期笔记及任务恢复尚未实现。
+- Todo 保存在运行状态中，尚未引入 `TODO.md`、长期笔记、checkpoint 或任务恢复。
+- 默认工作区仍是固定目录，不会为每个任务自动新建目录。
+- 阿米娅演示保留了特定的默认计划和验证命令，这些不是通用 Agent 的必要组成部分。
+- verifier 的工具集合虽然名为 `build_read_only_tools()`，仍含命令执行能力。提示词中的只读约束不是系统级隔离；命令在本机执行。
+- 模型验收依赖模型判断和工具结果，不等于对所有任务提供正确性保证。
 
-本版本保留了教学演示中的特定逻辑：康威生命游戏任务使用固定验证命令；模型计划解析失败时采用预设的备用计划，其他任务的备用计划也偏向 Python 开发。验收通过表示配置的验证命令全部成功，不等于模型独立检查了所有自然语言验收标准。
+本次阶段整理时，针对当前源码运行了适配包名及环境变量名的原项目参考测试：**44 项通过**；`python -m Agent01 --help` 入口检查通过。本次测试没有使用临时导出补丁，缺失的工具导出已在源码中修复。
 
-命令工具在本机执行命令，工作目录设置和基础命令拦截不构成完整的系统沙箱。
-
-阶段核对时，使用原项目第二阶段的四个测试文件、适配包名后临时运行，30 项测试通过；CLI 帮助入口检查通过。测试文件尚未纳入本仓库，真实模型任务仍需在配置服务后单独验证。这些检查不代表后续改动自动通过。
-
-下一阶段继续学习专家 Agent 分工及上下文管理。
+参考测试在仓库外临时运行，尚未纳入本仓库，因此新下载的仓库不能直接据此运行这 44 项测试。此次没有进行真实模型与 Tavily 服务的端到端任务验证，以上结果也不代表后续修改自动通过。
