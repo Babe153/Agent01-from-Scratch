@@ -117,10 +117,10 @@ def print_graph_event(payload: dict[str, Any]) -> None:
             continue
         if node == "planner":
             render_plan(update, title="Planner", border_style="cyan")
-        elif node == "actor":
-            summary = update.get("last_actor_summary")
+        elif node in {"actor", "codeAgent"}:
+            summary = update.get("code_agent_summary") or update.get("last_actor_summary")
             if summary:
-                console.print(Panel(_shorten(summary, 1200), title="Actor Summary", border_style="cyan"))
+                console.print(Panel(_shorten(summary, 1200),title="codeAgent Summary",border_style="cyan",))
         elif node == "verifier":
             render_verifier(update)
         elif node == "context_monitor":

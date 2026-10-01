@@ -1,4 +1,4 @@
-from Agent01.tools.registry import build_tools #重新导出build_tools
+from Agent01.tools.registry import build_read_only_tools, build_tools #重新导出build_tools
 #build_tools 原本定义在：Agent01/tools/registry.py
 #如果没有这行，其他文件通常要这样导入：from Agent01.tools.registry import build_tools
 #写在 __init__.py 以后，就可以简化为：from Agent01.tools import build_tools
