@@ -20,7 +20,7 @@ DANGEROUS_PATTERNS = [ #危险命令
     r"\bformat\b",
     r"\bshutdown\b",
     r"\breboot\b",
-    r">\s*(?:[A-Za-z]:\\|/)",
+    r"(?:^|[^0-9])>\s*(?:[A-Za-z]:\\|/(?!dev/null\b))",
 ]
 
 def bash_tool_description() -> str:
@@ -74,7 +74,13 @@ def _normalize_command(command: str) -> str:
         normalized = re.sub(r"\bls\b", "dir", normalized)
         normalized = re.sub(r"\bcat\s+([^\s|&<>]+)", r"type \1", normalized)
         return normalized
-    return command
+    return re.sub(
+        r"^\s*cd\s+(?:/workspace|workspace|\.?/workspace|\.mokioclaw[\\/]+workspace)\s*(?:&&|;)\s*pwd\s*$",
+        "cd",
+        command,
+        count=1,
+        flags=re.IGNORECASE,
+    )
 
 def _handle_tail_command(state: RuntimeState, command: str) -> dict[str, Any] | None:
     #识别 tail 命令，并且不用系统终端执行，而是直接通过 Python读取文件，返回文件最后几行

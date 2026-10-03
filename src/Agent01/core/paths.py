@@ -1,6 +1,9 @@
 from __future__ import annotations
 #导入 annotations 让类型注解延后处理
 
+from datetime import datetime
+from uuid import uuid4 #从 uuid 模块中，导入 uuid4 函数，用来生成随机的唯一标识符
+
 from pathlib import Path
 #从 Python 自带的 pathlib 模块中，导入处理文件和文件夹路径的 Path 类
 
@@ -21,3 +24,10 @@ def default_workspace(root: Path | None = None) -> Path:
     return (root or find_project_root()) / ".Agent01" / "workspace"
     #定义工作区路径
 
+def default_workspace_root(root: Path | None = None) -> Path:
+    return (root or find_project_root()) / ".mokioclaw" / "workspaces"
+
+def new_task_workspace(root: Path | None = None) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suffix = uuid4().hex[:6]
+    return default_workspace_root(root) / f"workspace-{stamp}-{suffix}"
