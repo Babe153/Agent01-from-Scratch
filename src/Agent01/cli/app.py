@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import sys #Python 运行环境和系统交互的标准库
 from pathlib import Path
-from typing import Annotated #typing 是 Python 专门提供类型注解工具的标准库。 Annotated 的作用是： 在原本的类型信息上，再附加一些额外说明或配置。
+from typing import Annotated, Literal #typing 是 Python 专门提供类型注解工具的标准库。 Annotated 的作用是： 在原本的类型信息上，再附加一些额外说明或配置。
 
 import typer #Typer 是一个第三方命令行开发框架，用来把普通 Python 函数转换成命令行程序
 
 from Agent01.cli.formatter import print_event, safe_echo, safe_secho
+from rich import box
+from rich.panel import Panel
+
+from Agent01.core.approval import ApprovalDecision, ApprovalRequest
 from Agent01.core.agent import stream_agent_events
 
 app = typer.Typer(help="Agent01: a mini CodeAgent.")
@@ -43,6 +47,10 @@ def main(
         int,
         typer.Option("--max-attempts", help="Maximum planner/actor/verifier attempts before finalizing."),
     ] = 3,
+    approval_mode: Annotated[
+        Literal["inline", "auto", "deny"],
+        typer.Option("--approval-mode", help="Human approval mode for high-risk BashTool commands: inline, auto, or deny."),
+    ] = "inline",
 ) -> None:
     if ctx.invoked_subcommand is not None: #ctx.invoked_subcommand 表示用户是否调用了某个子命令
         return
@@ -52,6 +60,29 @@ def main(
         raise typer.Exit()
 
     safe_secho("Agent01 version 3&4: MultiAgent + context compression", fg=typer.colors.MAGENTA) #前面代码都没执行 到这里准备唤醒agent
-    for event in stream_agent_events(task, workspace=workspace, max_attempts=max_attempts):
+    approval_handler = _inline_approval_handler if approval_mode == "inline" else None
+    for event in stream_agent_events(
+        task,
+        workspace=workspace,
+        max_attempts=max_attempts,
+        approval_mode=approval_mode,
+        approval_handler=approval_handler,
+    ):
         #event 接收每次 yield 出来的事件 每当 stream_agent_events() 执行一次： yield 某个事件 这个事件就会赋给：event
         print_event(event) #formatter里面那个方法 真正接收event然后打印出来
+
+
+def _inline_approval_handler(request: ApprovalRequest) -> ApprovalDecision:
+    from Agent01.cli.formatter import console
+
+    console.print(
+        Panel(
+            f"Command:\n{request.command}\n\nRisk:\n{request.risk_reason}",
+            title=f"Human Approval · {request.tool_name}",
+            border_style="yellow",
+            box=box.ROUNDED,
+        )
+    )
+    answer = typer.prompt("Approve? [y/N]", default="n", show_default=False).strip().lower()
+    approved = answer in {"y", "yes"}
+    return ApprovalDecision(approved=approved, reason="" if approved else "Rejected by human operator.")

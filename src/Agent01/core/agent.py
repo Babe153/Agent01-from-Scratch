@@ -8,19 +8,26 @@ from Agent01.core.state import RuntimeState
 from Agent01.tools import build_tools
 from Agent01.graph.workflow import build_workflow
 
-def create_runtime(workspace: Path | None = None) -> RuntimeState:
+def create_runtime(
+    workspace: Path | None = None,
+    *,
+    approval_mode: str = "inline",
+    approval_handler=None,
+) -> RuntimeState:
     #确定本次 Agent 使用哪个工作区，确保该工作区存在，然后创建一个 RuntimeState 工作区状态对象
     selected = workspace or default_workspace()
     selected.mkdir(parents=True, exist_ok=True) #parents=True 如果上层目录不存在，就一起创建。
-    return RuntimeState(workspace=selected)
+    return RuntimeState(workspace=selected, approval_mode=approval_mode, approval_handler=approval_handler)
 
 def stream_agent_events(
     task: str,
     *,
     workspace: Path | None = None,
     max_attempts: int = 3,
+    approval_mode: str = "inline",
+    approval_handler=None,
 ) -> Iterator[dict[str, Any]]:
-    state = create_runtime(workspace)
+    state = create_runtime(workspace, approval_mode=approval_mode, approval_handler=approval_handler)
     workflow = build_workflow()
     yield {"type": "workspace", "path": str(state.workspace)}
 

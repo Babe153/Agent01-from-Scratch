@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 #dataclass：帮你自动生成类里一些常见代码，例如创建对象时给属性赋值。
 #field：用来设置某个属性的默认值等规则。
 
+from typing import Callable
+from Agent01.core.approval import ApprovalDecision, ApprovalRequest, normalize_approval_mode
+
 from pathlib import Path
 #从 Python 自带的 pathlib 模块中，导入处理文件和文件夹路径的 Path 类
 
@@ -20,6 +23,11 @@ class RuntimeState:
     #程序运行时的一份记录
     workspace: Path
     read_files: dict[Path, FileSnapshot] = field(default_factory=dict)
+    approval_mode: str = "inline"
+    approval_handler: Callable[[ApprovalRequest], ApprovalDecision | bool] | None = None
+
+    def __post_init__(self) -> None:
+        self.approval_mode = normalize_approval_mode(self.approval_mode)
 
     def record_read(self, path: Path, *, complete: bool) -> None:
         #单独的 * 表示：它后面的参数必须通过名字传入。

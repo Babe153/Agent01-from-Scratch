@@ -8,6 +8,7 @@ import subprocess #用来从当前 Python程序中启动其他程序或执行系
 import time #用来计算命令运行了多久
 from typing import Any
 
+from Agent01.core.approval import ApprovalDecision, classify_command_risk, make_approval_request
 from Agent01.core.state import RuntimeState
 
 DEFAULT_TIMEOUT_SECONDS = 10 #防止命令运行太久
@@ -189,6 +190,10 @@ def run_bash(state: RuntimeState, command: str, timeout_seconds: int | str | flo
     if blocked:
         return {"ok": False, "error": f"blocked potentially dangerous command pattern: {blocked}"}
 
+    approval = _resolve_approval(state, normalized_command)
+    if approval is not None and not approval.get("approved"):
+        return approval
+
     started = time.perf_counter()
     #记录命令开始执行前的时间
 
@@ -234,4 +239,44 @@ def run_bash(state: RuntimeState, command: str, timeout_seconds: int | str | flo
         "stdout": stdout, #正常输出
         "stderr": stderr, #错误输出
         "duration_ms": round((time.perf_counter() - started) * 1000), #执行耗时
+        **(approval or {}),
+    }
+
+
+def _resolve_approval(state: RuntimeState, command: str) -> dict[str, Any] | None:
+    risk_reason = classify_command_risk(command)
+    if risk_reason is None:
+        return None
+
+    request = make_approval_request(command, risk_reason)
+    base = {
+        "requires_approval": True,
+        "approval_id": request.id,
+        "risk_reason": risk_reason,
+        "command": command,
+    }
+    if state.approval_mode == "auto":
+        return {**base, "approved": True}
+    if state.approval_mode == "deny" or state.approval_handler is None:
+        return {
+            **base,
+            "ok": False,
+            "approved": False,
+            "error": f"human approval required for high-risk command: {risk_reason}",
+        }
+
+    decision = state.approval_handler(request)
+    if isinstance(decision, ApprovalDecision):
+        approved = decision.approved
+        decision_reason = decision.reason
+    else:
+        approved = bool(decision)
+        decision_reason = ""
+    if approved:
+        return {**base, "approved": True}
+    return {
+        **base,
+        "ok": False,
+        "approved": False,
+        "error": decision_reason or f"human rejected high-risk command: {risk_reason}",
     }

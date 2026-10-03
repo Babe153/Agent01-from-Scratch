@@ -276,7 +276,10 @@ def _format_args(args: Any) -> str:
 def _format_tool_result(result: Any) -> str:
     if not isinstance(result, dict):
         return _shorten(result, 900)
-    keys = ["ok", "type", "path", "exit_code", "timed_out", "duration_ms", "error"]
+    keys = [
+        "ok", "type", "path", "exit_code", "timed_out", "duration_ms",
+        "requires_approval", "approved", "approval_id", "risk_reason", "error",
+    ]
     lines = [f"{key}: {result[key]}" for key in keys if key in result]
     if "stdout" in result and result["stdout"]:
         lines.append("stdout:\n" + _shorten(result["stdout"], 500))
