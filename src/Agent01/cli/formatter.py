@@ -278,6 +278,7 @@ def _format_tool_result(result: Any) -> str:
         return _shorten(result, 900)
     keys = [
         "ok", "type", "path", "exit_code", "timed_out", "duration_ms",
+        "background", "pid", #新增：后台状态和进程编号
         "requires_approval", "approved", "approval_id", "risk_reason", "error",
     ]
     lines = [f"{key}: {result[key]}" for key in keys if key in result]
@@ -285,6 +286,10 @@ def _format_tool_result(result: Any) -> str:
         lines.append("stdout:\n" + _shorten(result["stdout"], 500))
     if "stderr" in result and result["stderr"]:
         lines.append("stderr:\n" + _shorten(result["stderr"], 500))
+    #新增：展示完整输出或后台进程的日志位置，便于后续读取。
+    for path_key in ("stdout_path", "stderr_path"):
+        if result.get(path_key):
+            lines.append(f"{path_key}: {result[path_key]}")
     if "todos" in result:
         lines.append(f"todos: {len(result['todos'])} item(s)")
     if "heading" in result:

@@ -17,6 +17,7 @@ class FileSnapshot:
     path: Path # 文件路径
     mtime_ns: int # 文件最后修改时间，单位是纳秒
     complete: bool # 这次是否完整读取了文件
+    
 
 @dataclass
 class RuntimeState:
@@ -25,6 +26,11 @@ class RuntimeState:
     read_files: dict[Path, FileSnapshot] = field(default_factory=dict)
     approval_mode: str = "inline"
     approval_handler: Callable[[ApprovalRequest], ApprovalDecision | bool] | None = None
+    #命令工具配置：默认超时、超时上限、返回文本长度，以及可选的环境变量文件。
+    bash_default_timeout_seconds: int = 120
+    bash_max_timeout_seconds: int = 600
+    bash_max_output_chars: int = 6000
+    bash_env_file: Path | None = None
 
     def __post_init__(self) -> None:
         self.approval_mode = normalize_approval_mode(self.approval_mode)

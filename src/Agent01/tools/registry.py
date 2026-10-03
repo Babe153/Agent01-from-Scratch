@@ -40,7 +40,10 @@ def build_tools(state: RuntimeState) -> list[StructuredTool]:
         ),
         StructuredTool.from_function(
             name="BashTool",
-            func=lambda command, timeout_seconds=10: run_bash(state, command, timeout_seconds),
+            #改动：None 使用运行配置的超时；将后台运行开关传给命令工具。
+            func=lambda command, timeout_seconds=None, run_in_background=False: run_bash(
+                state, command, timeout_seconds, run_in_background
+            ),
             description=bash_tool_description(),
         ),
         StructuredTool.from_function(
@@ -71,7 +74,10 @@ def build_read_only_tools(state: RuntimeState) -> list[StructuredTool]:
         ),
         StructuredTool.from_function(
             name="BashTool",
-            func=lambda command, timeout_seconds=10: run_bash(state, command, timeout_seconds),
+            #改动：None 使用运行配置的超时；将后台运行开关传给命令工具。
+            func=lambda command, timeout_seconds=None, run_in_background=False: run_bash(
+                state, command, timeout_seconds, run_in_background
+            ),
             description=bash_tool_description(),
         ),
         StructuredTool.from_function(
