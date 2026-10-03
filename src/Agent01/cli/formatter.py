@@ -98,6 +98,9 @@ def print_custom_event(event: dict[str, Any]) -> None:
     if event_type == "search_summary":
         render_sources(event.get("sources", []), title="searchAgent Summary", answer=event.get("summary", ""))
         return
+    if event_type == "memory_snapshot":
+        render_memory_snapshot(event)
+        return
     if event_type == "context_monitor":
         render_context_monitor(event)
         return
@@ -123,6 +126,8 @@ def print_graph_event(payload: dict[str, Any]) -> None:
                 console.print(Panel(_shorten(summary, 1200),title="codeAgent Summary",border_style="cyan",))
         elif node == "verifier":
             render_verifier(update)
+        elif node == "memory_snapshot":
+            render_memory_snapshot(update)
         elif node == "context_monitor":
             render_context_monitor(update)
         elif node == "context_compressor":
@@ -231,6 +236,39 @@ def render_context_compression(update: dict[str, Any]) -> None:
         lines.append("summary:\n" + _shorten(summary, 900))
     console.print(Panel("\n".join(lines), title="Context Compression", border_style="yellow", box=box.ROUNDED))
 
+def render_memory_snapshot(update: dict[str, Any]) -> None:
+    layers = update.get("layers", {})
+
+    table = Table(box=box.SIMPLE_HEAVY, header_style="bold")
+    table.add_column("Layer", no_wrap=True)
+    table.add_column("Summary")
+
+    for name in ("rules", "working_memory", "history_summary_store"):
+        table.add_row(name, _shorten(layers.get(name, ""), 360))
+
+    footer = (
+        f"node={update.get('node', '')} | "
+        f"rules={update.get('rules_count', 0)} | "
+        f"todos={update.get('todo_count', 0)} | "
+        f"sources={update.get('source_count', 0)} | "
+        f"handoffs={update.get('handoff_count', 0)} | "
+        f"notepad={update.get('notepad_exists')} | "
+        f"history={update.get('history_exists')} "
+        f"{update.get('history_path', '')}"
+    )
+
+    body = Table.grid(expand=True)
+    body.add_row(table)
+    body.add_row(Text(footer, style="yellow"))
+
+    console.print(
+        Panel(
+            body,
+            title="Memory Snapshot",
+            border_style="cyan",
+            box=box.ROUNDED,
+        )
+    )
 
 def _format_args(args: Any) -> str:
     return _shorten(args, 900)
@@ -246,6 +284,10 @@ def _format_tool_result(result: Any) -> str:
         lines.append("stderr:\n" + _shorten(result["stderr"], 500))
     if "todos" in result:
         lines.append(f"todos: {len(result['todos'])} item(s)")
+    if "heading" in result:
+        lines.append(f"heading: {result['heading']}")
+    if "content" in result and result["content"]:
+        lines.append("content:\n" + _shorten(result["content"], 500))
     if "answer" in result and result["answer"]:
         lines.append("answer:\n" + _shorten(result["answer"], 500))
     if "results" in result:

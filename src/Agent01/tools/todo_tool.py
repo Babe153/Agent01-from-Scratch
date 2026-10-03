@@ -20,8 +20,14 @@ def _normalize_items(items: Any) -> list[str]:
         return _normalize_items(decoded) #递归调用自己 json.loads() 只负责解析 JSON，而 _normalize_items() 继续负责把解析结果统一整理成 list[str]。
     
     if isinstance(items, dict): #传入字典
-        value = items.get("content") or items.get("title") or items.get("text") or items.get("command")
-        return [str(value).strip()] if value else []
+        value = items.get("content") or items.get("description") or items.get("title") or items.get("text") or items.get("command")
+        if value:
+            return [str(value).strip()]
+        normalized: list[str] = []
+        for key, item in items.items():
+            child_items = _normalize_items(item)
+            normalized.extend(child_items or [str(key).strip()])
+        return [item for item in normalized if item]
     
     if isinstance(items, list): #传入列表
         normalized: list[str] = [] #初始化一个列表normalized用于存储处理完的字符串

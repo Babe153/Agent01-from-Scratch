@@ -13,12 +13,19 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from Agent01.agents.code_agent import run_code_agent
 from Agent01.agents.search_agent import run_search_agent
+from Agent01.graph.memory import (
+    build_layered_memory,
+    format_layered_memory_for_prompt,
+    memory_event,
+    persist_history_summary,
+)
 from Agent01.graph.state import Agent01GraphState, TodoItem, VerificationCheck
 from Agent01.prompts.version3 import PLANNER_PROMPT, VERIFIER_PROMPT
 from Agent01.prompts.version4 import CONTEXT_COMPRESSION_PROMPT
 from Agent01.providers.openai_provider import create_model
 from Agent01.tools import build_read_only_tools
-from Agent01.tools.todo_tool import write_todos
+from Agent01.tools.todo_tool import persist_todos, write_todos
+
 
 DEFAULT_CONTEXT_TOKEN_LIMIT = 400000
 
@@ -46,17 +53,27 @@ DEFAULT_TODOS = [
     "Verify the generated result.",
 ]
 
+
 def planner_node(state: Agent01GraphState) -> dict[str, Any]:
     writer = _get_writer()
     working_state: Agent01GraphState = {**state}
     if not working_state.get("todos"):
         _apply_plan(working_state, _default_plan(working_state["task"]))
+        persist_todos(
+            working_state["runtime"],
+            working_state.get("todos", []),
+            working_state.get("acceptance_criteria", []),
+            working_state.get("verification_commands", []),
+            working_state.get("plan_summary", ""),
+        )
 
+    memory = build_layered_memory(working_state, node="planner")
+    writer(memory_event(memory, node="planner"))
     model = create_model()
     planner = model.bind_tools(_build_planner_tools(working_state, writer))
     messages: list[Any] = [
         SystemMessage(content=PLANNER_PROMPT),
-        HumanMessage(content=_planner_input(working_state)),
+        HumanMessage(content=_planner_input(working_state, memory)),
     ]
     produced_messages: list[Any] = []
 
@@ -87,6 +104,7 @@ def planner_node(state: Agent01GraphState) -> dict[str, Any]:
 
     metadata = dict(working_state.get("metadata", {}))
     metadata["planner_raw"] = _last_ai_content(produced_messages)
+    final_memory = build_layered_memory(working_state, node="planner")
     return {
         "plan_summary": working_state.get("plan_summary", ""),
         "todos": working_state.get("todos", []),
@@ -98,6 +116,8 @@ def planner_node(state: Agent01GraphState) -> dict[str, Any]:
         "code_agent_summary": working_state.get("code_agent_summary", ""),
         "last_actor_summary": working_state.get("code_agent_summary", ""),
         "messages": produced_messages,
+        "memory_snapshot": final_memory,
+        "history_summary": final_memory.get("history_summary_store", {}).get("history_summary", ""),
         "metadata": metadata,
         "context_next_node": "verifier",
     }
@@ -105,6 +125,8 @@ def planner_node(state: Agent01GraphState) -> dict[str, Any]:
 
 def verifier_node(state: Agent01GraphState) -> dict[str, Any]:
     writer = _get_writer()
+    memory = build_layered_memory(state, node="verifier")
+    writer(memory_event(memory, node="verifier"))
     writer(
         {
             "type": "plan_snapshot",
@@ -119,7 +141,7 @@ def verifier_node(state: Agent01GraphState) -> dict[str, Any]:
     verifier = model.bind_tools(build_read_only_tools(state["runtime"]))
     messages: list[Any] = [
         SystemMessage(content=VERIFIER_PROMPT),
-        HumanMessage(content=_verifier_input(state)),
+        HumanMessage(content=_verifier_input(state, memory)),
     ]
     produced_messages: list[Any] = []
     tool_events: list[dict[str, Any]] = []
@@ -201,8 +223,11 @@ def verifier_node(state: Agent01GraphState) -> dict[str, Any]:
         "attempts": attempts,
         "last_error": last_error,
         "todos": todos,
+        "memory_snapshot": memory,
+        "history_summary": memory.get("history_summary_store", {}).get("history_summary", ""),
         "context_next_node": verifier_route({**state, "passed": passed, "attempts": attempts}),
     }
+
 
 def context_monitor_node(state: Agent01GraphState) -> dict[str, Any]:
     writer = _get_writer()
@@ -226,23 +251,33 @@ def context_monitor_node(state: Agent01GraphState) -> dict[str, Any]:
         "context_next_node": next_node,
     }
 
+
 def context_monitor_route(state: Agent01GraphState) -> str:
     if state.get("context_should_compress"):
         return "context_compressor"
     return state.get("context_next_node") or "verifier"
 
+
 def context_compressor_node(state: Agent01GraphState) -> dict[str, Any]:
     writer = _get_writer()
     before_tokens = state.get("context_token_count") or estimate_context_tokens(state)
     before_messages = list(state.get("messages", []))
-    compressed = _compress_context_with_model(state) #真正压缩的地方
+    memory = build_layered_memory(state, node="context_compressor")
+    writer(memory_event(memory, node="context_compressor"))
+    compressed = _compress_context_with_model(state)
     summary = _format_compressed_context(compressed, state)
     summary_message = AIMessage(content=summary)
+    persist_history_summary(state["runtime"], summary)
 
     post_state: Agent01GraphState = {
         **state,
         "messages": [summary_message],
         "context_summary": summary,
+        "history_summary": summary,
+        "memory_snapshot": build_layered_memory(
+            {**state, "context_summary": summary, "history_summary": summary},
+            node="context_compressor",
+        ),
         "research_notes": _short_text(state.get("research_notes", ""), 1200),
         "agent_handoffs": _trim_handoffs(state.get("agent_handoffs", [])),
         "last_error": _short_text(state.get("last_error", ""), 1600),
@@ -269,11 +304,15 @@ def context_compressor_node(state: Agent01GraphState) -> dict[str, Any]:
         "last_error": post_state.get("last_error", ""),
         "code_agent_summary": post_state.get("code_agent_summary", ""),
         "verifier_summary": post_state.get("verifier_summary", ""),
+        "memory_snapshot": post_state.get("memory_snapshot", {}),
+        "history_summary": summary,
         "compression_events": events,
     }
 
+
 def context_compressor_route(state: Agent01GraphState) -> str:
     return state.get("context_next_node") or "verifier"
+
 
 def verifier_route(state: Agent01GraphState) -> str:
     if state.get("passed"):
@@ -312,6 +351,7 @@ def final_node(state: Agent01GraphState) -> dict[str, Any]:
     )
     return {"final_answer": final_answer}
 
+
 def get_context_token_limit() -> int:
     load_dotenv()
     raw = os.getenv("AGENT_CONTEXT_TOKEN_LIMIT", str(DEFAULT_CONTEXT_TOKEN_LIMIT))
@@ -321,9 +361,10 @@ def get_context_token_limit() -> int:
         return DEFAULT_CONTEXT_TOKEN_LIMIT
     return value if value > 0 else DEFAULT_CONTEXT_TOKEN_LIMIT
 
+
 def estimate_context_tokens(state: Agent01GraphState) -> int:
     messages = list(state.get("messages", []))
-    payload = _context_payload(state)
+    payload = build_layered_memory(state, node="context_monitor")
     payload_message = HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str))
     try:
         model = create_model()
@@ -332,6 +373,7 @@ def estimate_context_tokens(state: Agent01GraphState) -> int:
         text = "\n".join(_message_text(message) for message in messages)
         text += "\n" + payload_message.content
         return max(1, len(text) // 4)
+
 
 def _build_planner_tools(state: Agent01GraphState, writer) -> list[StructuredTool]:
     return [
@@ -357,6 +399,7 @@ def _build_planner_tools(state: Agent01GraphState, writer) -> list[StructuredToo
         ),
     ]
 
+
 def _todo_write_tool(
     state: Agent01GraphState,
     writer,
@@ -371,6 +414,13 @@ def _todo_write_tool(
         state["todos"] = _todo_items(result["todos"], existing=state.get("todos", []))
         state["acceptance_criteria"] = result["acceptance_criteria"]
         state["verification_commands"] = result["verification_commands"]
+        persist_todos(
+            state["runtime"],
+            state["todos"],
+            state["acceptance_criteria"],
+            state["verification_commands"],
+            state.get("plan_summary", ""),
+        )
         writer(
             {
                 "type": "plan_snapshot",
@@ -386,6 +436,7 @@ def _todo_write_tool(
         "plan_summary": state.get("plan_summary", ""),
         "todo_items": state.get("todos", []),
     }
+
 
 def _call_search_agent_tool(state: Agent01GraphState, writer, instruction: str) -> dict[str, Any]:
     writer({"type": "handoff", "from": "planner", "to": "searchAgent", "instruction": instruction})
@@ -407,6 +458,7 @@ def _call_search_agent_tool(state: Agent01GraphState, writer, instruction: str) 
         "sources": state.get("sources", []),
         "queries": result.get("queries", []),
     }
+
 
 def _call_code_agent_tool(state: Agent01GraphState, writer, instruction: str) -> dict[str, Any]:
     writer({"type": "handoff", "from": "planner", "to": "codeAgent", "instruction": instruction})
@@ -467,9 +519,10 @@ def _execute_read_only_tool(state: Agent01GraphState, call: dict[str, Any]) -> T
 
 
 def _compress_context_with_model(state: Agent01GraphState) -> dict[str, Any]:
+    memory = build_layered_memory(state, node="context_compressor")
     payload = {
         "context_summary": state.get("context_summary", ""),
-        "state": _context_payload(state),
+        "memory": memory,
         "messages": [_message_snapshot(message) for message in state.get("messages", [])],
     }
     messages = [
@@ -531,28 +584,7 @@ def _format_compressed_context(compressed: dict[str, Any], state: Agent01GraphSt
 
 
 def _context_payload(state: Agent01GraphState) -> dict[str, Any]:
-    return {
-        "task": state.get("task", ""),
-        "plan_summary": state.get("plan_summary", ""),
-        "todos": state.get("todos", []),
-        "acceptance_criteria": state.get("acceptance_criteria", []),
-        "verification_commands": state.get("verification_commands", []),
-        "research_notes": state.get("research_notes", ""),
-        "sources": [
-            {"title": source.get("title", ""), "url": source.get("url", "")}
-            for source in state.get("sources", [])
-        ],
-        "agent_handoffs": state.get("agent_handoffs", []),
-        "code_agent_summary": state.get("code_agent_summary", ""),
-        "verifier_summary": state.get("verifier_summary", ""),
-        "verification_checks": state.get("verification_checks", []),
-        "last_error": state.get("last_error", ""),
-        "attempts": state.get("attempts", 0),
-        "max_attempts": state.get("max_attempts", 3),
-        "context_summary": state.get("context_summary", ""),
-        "context_next_node": state.get("context_next_node", ""),
-        "compression_events": state.get("compression_events", []),
-    }
+    return build_layered_memory(state, node="graph")
 
 
 def _message_snapshot(message: Any) -> dict[str, str]:
@@ -586,35 +618,20 @@ def _important_files_from_state(state: Agent01GraphState) -> list[str]:
     return deduped
 
 
-def _planner_input(state: Agent01GraphState) -> str:
-    source_text = "\n".join(f"- {source.get('title', '')}: {source.get('url', '')}" for source in state.get("sources", []))
+def _planner_input(state: Agent01GraphState, memory: dict[str, Any]) -> str:
     return (
         f"Task: {state['task']}\n"
         f"Attempt: {state.get('attempts', 0) + 1}\n\n"
-        f"Current plan: {state.get('plan_summary', '')}\n"
-        f"Todos:\n{_todos_text(state.get('todos', []))}\n\n"
-        f"Acceptance criteria:\n{_list_text(state.get('acceptance_criteria', []))}\n\n"
-        f"Verification commands:\n{_list_text(state.get('verification_commands', []))}\n\n"
-        f"Research notes:\n{state.get('research_notes', '')}\n\n"
-        f"Sources:\n{source_text}\n\n"
-        f"CodeAgent summary:\n{state.get('code_agent_summary', '')}\n\n"
-        f"Previous verifier failure:\n{state.get('last_error', '')}"
-        f"\n\nCompressed context summary, if any:\n{state.get('context_summary', '')}"
+        "Layered memory snapshot:\n"
+        f"{format_layered_memory_for_prompt(memory)}"
     )
 
 
-def _verifier_input(state: Agent01GraphState) -> str:
-    source_text = "\n".join(f"- {source.get('title', '')}: {source.get('url', '')}" for source in state.get("sources", []))
+def _verifier_input(state: Agent01GraphState, memory: dict[str, Any]) -> str:
     return (
         f"Task: {state['task']}\n\n"
-        f"Plan: {state.get('plan_summary', '')}\n\n"
-        f"Todos:\n{_todos_text(state.get('todos', []))}\n\n"
-        f"Acceptance criteria:\n{_list_text(state.get('acceptance_criteria', []))}\n\n"
-        f"Verification commands:\n{_list_text(state.get('verification_commands', []))}\n\n"
-        f"Research notes:\n{state.get('research_notes', '')}\n\n"
-        f"Sources:\n{source_text}\n\n"
-        f"CodeAgent summary:\n{state.get('code_agent_summary', '')}\n\n"
-        f"Compressed context summary:\n{state.get('context_summary', '')}\n\n"
+        "Layered memory snapshot:\n"
+        f"{format_layered_memory_for_prompt(memory)}\n\n"
         "Inspect the workspace with tools and return only verifier JSON."
     )
 

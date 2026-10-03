@@ -53,6 +53,11 @@ class CompressionEvent(TypedDict, total=False):
     summary: str
     next_node: str
 
+class LayeredMemory(TypedDict, total=False):
+    rules: dict[str, Any]
+    working_memory: dict[str, Any]
+    history_summary_store: dict[str, Any]
+
 
 
 class Agent01GraphState(TypedDict, total=False): #total=False 这表示下面声明的字段不要求同时存在。
@@ -82,6 +87,9 @@ class Agent01GraphState(TypedDict, total=False): #total=False 这表示下面声
     context_should_compress: bool
     context_next_node: str
     compression_events: list[CompressionEvent]
+
+    memory_snapshot: LayeredMemory
+    history_summary: str
     
     last_error: str #保存最近一次发生的错误
     metadata: dict[str, Any] #用于保存不适合单独定义成字段的附加数据

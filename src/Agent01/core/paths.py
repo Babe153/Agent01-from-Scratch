@@ -21,11 +21,11 @@ def find_project_root(start: Path | None = None) -> Path:
     return current
 
 def default_workspace(root: Path | None = None) -> Path:
-    return (root or find_project_root()) / ".Agent01" / "workspace"
+    return new_task_workspace(root)
     #定义工作区路径
 
 def default_workspace_root(root: Path | None = None) -> Path:
-    return (root or find_project_root()) / ".mokioclaw" / "workspaces"
+    return (root or find_project_root()) / ".Agent01" / "workspaces"
 
 def new_task_workspace(root: Path | None = None) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
