@@ -6,11 +6,28 @@
 
 <p align="center">逐文件阅读、重建一个 Agent，理解工具调用、任务调度与上下文管理。</p>
 
+## Checkpoint 阶段更新
+
+已接入参考版本 `340a3e3` 的进度保存和恢复功能。下方保留之前阶段的学习说明；工作区生命周期详见 [工作区说明](docs/workspace-lifecycle.md)。
+
+```powershell
+# 启动任务并保存摘要（默认 light）
+uv run Agent01 "你的任务" --checkpoint-mode light
+# 保存完整的可序列化状态和消息
+uv run Agent01 "你的任务" --checkpoint-mode strict
+# 使用之前输出的工作区路径恢复；strict 保存的任务建议显式选择 strict
+uv run Agent01 --resume "原工作区路径" --checkpoint-mode strict
+```
+
+进度文件保存在任务工作区的 `.Agent01/checkpoints/` 下。`light` 保存摘要和恢复说明；`strict` 额外保存状态、消息和事件日志；`off` 关闭保存。Ctrl+C 中断会保存已收集的进度，恢复后重新运行工作流，并不是返回到中断的那一行代码。Git 快照用于记录文件版本，恢复命令不会自动回滚文件。
+
+程序接口未指定模式时读取 `AGENT_CHECKPOINT_MODE`；此参考版本的 CLI 默认显式传入 `light`，因此从命令行切换模式请使用 `--checkpoint-mode`。
+
 ## 关于项目
 
 Agent01 是我的 Agent 开发学习仓库，参考 MokioClaw 项目逐步重建，并在代码中记录理解与注释。“From Scratch”指从基础模块开始学习和组装；模型调用和工作流使用 LangChain、LangGraph 等现有框架。
 
-**当前进度：第三、四阶段代码迁移完成——MultiAgent 专家分工 + Context Engineering 自动压缩。** 本阶段参考原项目提交 `7bd50cc`，该提交同时引入多 Agent 与上下文压缩。
+**第三、四阶段学习记录：MultiAgent 专家分工 + Context Engineering 自动压缩。** 本阶段参考原项目提交 `7bd50cc`，该提交同时引入多 Agent 与上下文压缩。
 
 | 阶段 | 学习内容 | 说明 |
 | --- | --- | --- |

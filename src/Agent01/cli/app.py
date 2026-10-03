@@ -41,7 +41,7 @@ def main(
     task: Annotated[str | None, typer.Argument(help="Natural-language task for the CodeAgent.")] = None, #task：用户输入的自然语言任务 = None表示表示用户不提供任务时 task = None
     workspace: Annotated[ #类型、Typer 配置、默认值三部分构成
         Path | None,
-        typer.Option("--workspace", "-w", help="Workspace for generated files. Defaults to a fresh .mokioclaw/workspaces/workspace-* directory."),
+        typer.Option("--workspace", "-w", help="Workspace for generated files. Defaults to a fresh .Agent01/workspaces/workspace-* directory."),
     ] = None,
     max_attempts: Annotated[
         int,
@@ -51,15 +51,25 @@ def main(
         Literal["inline", "auto", "deny"],
         typer.Option("--approval-mode", help="Human approval mode for high-risk BashTool commands: inline, auto, or deny."),
     ] = "inline",
+    #新增：选择保存模式；通过 --resume 指定已有工作区继续任务。
+    checkpoint_mode: Annotated[
+        Literal["light", "strict", "off"],
+        typer.Option("--checkpoint-mode", help="Checkpoint mode: light, strict, or off."),
+    ] = "light",
+    resume: Annotated[
+        Path | None,
+        typer.Option("--resume", help="Resume from an existing Agent01 workspace."),
+    ] = None,
 ) -> None:
     if ctx.invoked_subcommand is not None: #ctx.invoked_subcommand 表示用户是否调用了某个子命令
         return
     configure_console()
-    if not task:
+    #恢复时可以不重复输入任务，原任务会从 checkpoint 中读取。
+    if not task and resume is None:
         safe_echo(ctx.get_help())
         raise typer.Exit()
 
-    safe_secho("Agent01 version 3&4: MultiAgent + context compression", fg=typer.colors.MAGENTA) #前面代码都没执行 到这里准备唤醒agent
+    safe_secho("Agent01 version 5: MultiAgent + context/harness engineering", fg=typer.colors.MAGENTA) #前面代码都没执行 到这里准备唤醒agent
     approval_handler = _inline_approval_handler if approval_mode == "inline" else None
     for event in stream_agent_events(
         task,
@@ -67,6 +77,8 @@ def main(
         max_attempts=max_attempts,
         approval_mode=approval_mode,
         approval_handler=approval_handler,
+        checkpoint_mode=checkpoint_mode,
+        resume_workspace=resume,
     ):
         #event 接收每次 yield 出来的事件 每当 stream_agent_events() 执行一次： yield 某个事件 这个事件就会赋给：event
         print_event(event) #formatter里面那个方法 真正接收event然后打印出来

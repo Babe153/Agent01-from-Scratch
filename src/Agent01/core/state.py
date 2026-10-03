@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 #field：用来设置某个属性的默认值等规则。
 
 from typing import Callable
+from Agent01.core.checkpoint import normalize_checkpoint_mode
 from Agent01.core.approval import ApprovalDecision, ApprovalRequest, normalize_approval_mode
 
 from pathlib import Path
@@ -31,9 +32,13 @@ class RuntimeState:
     bash_max_timeout_seconds: int = 600
     bash_max_output_chars: int = 6000
     bash_env_file: Path | None = None
+    #保存进度的模式，以及本次恢复任务所使用的工作区。
+    checkpoint_mode: str = "light"
+    resume_from: Path | None = None
 
     def __post_init__(self) -> None:
         self.approval_mode = normalize_approval_mode(self.approval_mode)
+        self.checkpoint_mode = normalize_checkpoint_mode(self.checkpoint_mode)
 
     def record_read(self, path: Path, *, complete: bool) -> None:
         #单独的 * 表示：它后面的参数必须通过名字传入。
