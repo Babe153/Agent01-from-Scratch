@@ -57,6 +57,37 @@ def summarize_custom_event(event: dict[str, Any]) -> EventSummary:
             "chat",
             "cyan",
         )
+    #这些事件描述持久会话的生命周期，转换成 TUI 面板内容。
+    if event_type == "session_started":
+        return EventSummary(
+            "Session Started",
+            (
+                f"session: {event.get('session_id', '')}\n"
+                f"workspace: {event.get('workspace', '')}\n"
+                f"turns: {event.get('turn_index', 0)}\n"
+                f"resumed: {event.get('resumed', False)}"
+            ),
+            "session",
+            "cyan",
+        )
+    if event_type == "session_turn_started":
+        return EventSummary(
+            "Session Turn",
+            f"turn: {event.get('turn', 0)}\n{shorten(event.get('task', ''), 900)}",
+            "session",
+            "magenta",
+        )
+    if event_type == "session_turn_saved":
+        return EventSummary(
+            "Session Saved",
+            (
+                f"turn: {event.get('turn', 0)}\n"
+                f"route: {event.get('route', '')}\n"
+                f"summary: {event.get('summary_file', '')}"
+            ),
+            "session",
+            "green",
+        )
     if event_type in {"plan_snapshot", "todo_update"}:
         return _summarize_plan(event, "Plan Snapshot" if event_type == "plan_snapshot" else "Todo Updated")
     if event_type == "tool_call":

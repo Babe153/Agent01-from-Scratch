@@ -16,7 +16,8 @@ from Agent01.cli.event_summary import EventSummary, shorten, summarize_event
 from Agent01.cli.tui.approval import ApprovalGate, ApprovalModal
 from Agent01.cli.tui.logo import render_logo
 from Agent01.core.approval import ApprovalDecision, ApprovalRequest
-from Agent01.core.agent import stream_agent_events
+from Agent01.core.agent import stream_session_events
+from Agent01.core.paths import default_workspace
 
 
 StreamFactory = Callable[..., Iterable[dict[str, Any]]]
@@ -156,16 +157,18 @@ class Agent01TuiApp(App[None]):
         checkpoint_mode: Literal["light", "strict", "off"] = "light",
         trace_mode: Literal["on", "off"] = "on",
         resume: Path | None = None,
-        stream_factory: StreamFactory = stream_agent_events,
+        stream_factory: StreamFactory = stream_session_events,
     ) -> None:
         """保存启动参数，初始化界面使用的状态和计数器，此时还不执行 Agent。
-        stream_factory 是可替换的事件流函数，默认使用 stream_agent_events；
+        stream_factory 是可替换的事件流函数，默认使用 stream_session_events；
         测试时可传入假事件流，因此不需要调用模型。workspace/resume 决定工作区，
         running 防止重复启动，Lock 用于保护状态更新。控件由后面的 compose 创建。
         """
         super().__init__()
         self.initial_task = initial_task
-        self.workspace = workspace
+        #一次 TUI 会话选定一个工作区，后续提交持续复用；/new 才换目录。
+        self.workspace = resume or workspace or default_workspace()
+        self.session_workspace = self.workspace
         self.max_attempts = max_attempts
         self.approval_mode = approval_mode
         self.checkpoint_mode = checkpoint_mode
@@ -177,9 +180,12 @@ class Agent01TuiApp(App[None]):
         self.approval_count = 0
         self.failed_tool_count = 0
         self.tool_count = 0
-        self.latest_workspace = str(resume or workspace or "")
+        self.latest_workspace = str(self.session_workspace)
         self.latest_checkpoint = ""
         self.latest_trace = ""
+        self.session_id = ""
+        self.session_turn = 0
+        self.last_route = ""
         self.sidebar_text = ""
         self.todos: list[dict[str, Any]] = []
         self._state_lock = Lock()
@@ -206,8 +212,8 @@ class Agent01TuiApp(App[None]):
                     yield Static("", id="side-state")
             with Horizontal(id="input-row"):
                 yield Static("❯", id="prompt")
-                yield Input(placeholder="Describe a task for Agent01, then press Enter", id="task-input")
-                yield Static("Enter run · Ctrl+L clear · Ctrl+Q quit", id="hint")
+                yield Input(placeholder="Chat or ask for coding work, then press Enter", id="task-input")
+                yield Static("Enter send · /new session · Ctrl+L clear", id="hint")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -225,7 +231,8 @@ class Agent01TuiApp(App[None]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """用户在输入框按 Enter 时调用，event 带有输入框和输入内容。
         只处理 task-input，忽略空白任务以及运行中的重复提交。
-        清空输入框后启动新任务；传入 None 表示这次输入不使用恢复路径。
+        清空输入框后启动新一轮；/new 切换会话，其余输入复用当前工作区。
+        传入 None 仅表示不加载 checkpoint，不表示创建新的工作区。
         """
         if event.input.id != "task-input":
             return
@@ -233,6 +240,10 @@ class Agent01TuiApp(App[None]):
         if not task or self.running:
             return
         event.input.value = ""
+        #本地界面命令不发送给模型。
+        if task == "/new":
+            self.start_new_session()
+            return
         self.start_task(task, None)
 
     def on_agent_event_message(self, message: AgentEventMessage) -> None:
@@ -280,7 +291,7 @@ class Agent01TuiApp(App[None]):
 
     def start_task(self, task: str, resume: Path | None = None) -> None:
         """开始一项任务前设置界面状态，并把实际工作交给后台线程。
-        防止并发提交，递增运行次数，清空本轮 TODO 和工具计数、日志路径，
+        防止并发提交，递增运行次数，清空本轮 TODO 和工具计数，保留同一会话上轮的日志路径，
         禁用输入框并显示任务说明。审批计数在此版本中不会逐任务重置。
         run_worker(thread=True) 执行 _run_stream，避免模型请求阻塞界面事件循环。
         """
@@ -292,8 +303,6 @@ class Agent01TuiApp(App[None]):
         self.todos = []
         self.failed_tool_count = 0
         self.tool_count = 0
-        self.latest_checkpoint = ""
-        self.latest_trace = ""
         self.query_one("#task-input", Input).disabled = True
         self.query_one("#status", Static).update("running")
         self._refresh_sidebar()
@@ -311,7 +320,7 @@ class Agent01TuiApp(App[None]):
             approval_handler = self._approval_handler if self.approval_mode == "inline" else None
             for event in self.stream_factory(
                 task,
-                workspace=self.workspace if resume is None else None,
+                session_workspace=self.session_workspace,
                 max_attempts=self.max_attempts,
                 approval_mode=self.approval_mode,
                 approval_handler=approval_handler,
@@ -371,6 +380,7 @@ class Agent01TuiApp(App[None]):
         with self._state_lock:
             if event.get("type") == "workspace":
                 self.latest_workspace = str(event.get("path", ""))
+                self.session_workspace = Path(self.latest_workspace)
                 return
             payload = event.get("event")
             if event.get("type") == "graph_event" and isinstance(payload, dict):
@@ -400,15 +410,25 @@ class Agent01TuiApp(App[None]):
             self.latest_checkpoint = str(payload.get("path", ""))
         if payload.get("type") == "trace_summary":
             self.latest_trace = str(payload.get("trace_dir", ""))
+        #保存后端事件里的会话信息，用于侧栏显示，不在界面直接写 session.json。
+        if payload.get("type") == "session_started":
+            self.session_id = str(payload.get("session_id", ""))
+            self.session_turn = int(payload.get("turn_index", 0) or 0)
+            self.latest_workspace = str(payload.get("workspace", self.latest_workspace))
+        if payload.get("type") == "session_turn_started":
+            self.session_turn = int(payload.get("turn", self.session_turn) or self.session_turn)
+        if payload.get("type") == "session_turn_saved":
+            self.session_turn = int(payload.get("turn", self.session_turn) or self.session_turn)
+            self.last_route = str(payload.get("route", self.last_route))
 
     def _write_welcome(self) -> None:
         """查找事件日志控件，追加一块欢迎面板。
-        启动界面和清屏后都会调用，说明输入任务即可开始，以及默认工作区规则。
+        启动界面和清屏后都会调用，说明输入任务即可开始，使用 /new 才切换会话工作区。
         """
         log = self.query_one("#events", RichLog)
         log.write(
             Panel(
-                "Enter a task to start. Each submitted task gets a fresh workspace by default.",
+                "Enter a message to start a persistent coding session. Use /new to open a fresh workspace.",
                 title="Agent01",
                 border_style="cyan",
             )
@@ -419,9 +439,9 @@ class Agent01TuiApp(App[None]):
         将任务文字截断到显示上限，附上新任务或恢复任务的信息，
         使用运行次数作为面板标题，便于区分连续提交的任务。
         """
-        mode = f"resume: {resume}" if resume is not None else "new workspace"
+        mode = f"resume: {resume}" if resume is not None else f"session workspace: {self.session_workspace}"
         self.query_one("#events", RichLog).write(
-            Panel(shorten(task, 1000) + f"\n\n{mode}", title=f"Run {self.run_count}", border_style="magenta")
+            Panel(shorten(task, 1000) + f"\n\n{mode}", title=f"Turn {self.run_count}", border_style="magenta")
         )
 
     def _write_summary(self, summary: EventSummary) -> None:
@@ -438,7 +458,7 @@ class Agent01TuiApp(App[None]):
         较长路径只在显示时截短，原始路径不变；sidebar_text 保留文本版本供测试检查。
         """
         status = "running" if self.running else "ready"
-        workspace = shorten(self.latest_workspace or "(new per task)", 80)
+        workspace = shorten(self.latest_workspace or str(self.session_workspace), 80)
         checkpoint = shorten(self.latest_checkpoint or "(waiting)", 80)
         trace = shorten(self.latest_trace or "(waiting)", 80)
         tools = f"{self.tool_count} total / {self.failed_tool_count} failed"
@@ -447,7 +467,9 @@ class Agent01TuiApp(App[None]):
         self.sidebar_text = "\n".join(
             [
                 f"status {status}",
-                f"runs {self.run_count}",
+                f"turns {self.run_count}",
+                f"session {self.session_id}",
+                f"route {self.last_route or '(none)'}",
                 f"workspace {workspace}",
                 f"checkpoint {checkpoint}",
                 f"trace {trace}",
@@ -460,7 +482,9 @@ class Agent01TuiApp(App[None]):
         table.add_column(style="bold cyan", no_wrap=True)
         table.add_column()
         table.add_row("status", status)
-        table.add_row("runs", str(self.run_count))
+        table.add_row("turns", str(self.run_count))
+        table.add_row("session", shorten(self.session_id or "(starting)", 24))
+        table.add_row("route", self.last_route or "(none)")
         table.add_row("workspace", workspace)
         table.add_row("checkpoint", checkpoint)
         table.add_row("trace", trace)
@@ -485,3 +509,29 @@ class Agent01TuiApp(App[None]):
         if current:
             return f"{count_text}\n{shorten(current.get('content', current.get('description', '')), 120)}"
         return count_text
+
+    def start_new_session(self) -> None:
+        """处理 /new：空闲时选择新工作区，并清空会话 ID、路由和侧栏统计。
+        不会删除旧工作区或其 session.json；旧记录仍可通过指定原路径继续使用。
+        run_count 在本版本没有重置，侧栏 turns 是本次 TUI 启动以来提交的次数。
+        """
+        if self.running:
+            self.notify("Agent01 is already running a task.", severity="warning")
+            return
+        self.workspace = default_workspace()
+        self.session_workspace = self.workspace
+        self.resume = None
+        self.latest_workspace = str(self.session_workspace)
+        self.latest_checkpoint = ""
+        self.latest_trace = ""
+        self.session_id = ""
+        self.session_turn = 0
+        self.last_route = ""
+        self.todos = []
+        self.failed_tool_count = 0
+        self.tool_count = 0
+        self.approval_count = 0
+        self._refresh_sidebar()
+        self.query_one("#events", RichLog).write(
+            Panel(str(self.session_workspace), title="New Session", border_style="cyan")
+        )

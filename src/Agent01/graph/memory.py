@@ -30,6 +30,7 @@ MAX_TEXT_CHARS = {
     "verifier_summary": 1000,
     "last_error": 1400,
     "context_summary": 1600,
+    "session_context": 1800,
     "notepad": 1800,
     "history_summary": 2200,
 }
@@ -49,6 +50,10 @@ def build_layered_memory(state: dict[str, Any], *, node: str = "graph") -> dict[
     working_memory = {
         "node": node,
         "task": state.get("task", ""),
+        #会话背景也纳入工作记忆，显示时按独立字符上限截断。
+        "session_id": state.get("session_id", ""),
+        "session_turn": state.get("session_turn", 0),
+        "session_context": _short_text(state.get("session_context", ""), MAX_TEXT_CHARS["session_context"]),
         "plan_summary": state.get("plan_summary", ""),
         "todos": state.get("todos", []),
         "acceptance_criteria": state.get("acceptance_criteria", []),

@@ -62,6 +62,10 @@ Classify the user's latest input into exactly one route:
 - chat: greetings, thanks, identity/help questions, ordinary conceptual Q&A, or conversational messages that do not need workspace access.
 - workflow: any request that needs creating/editing/reading files, running commands, installing packages, searching the web, checking the current project, verifying a result, or producing a concrete deliverable.
 
+When session context is provided, use it only to understand whether the latest
+input is a continuation of prior coding work. A short follow-up like "继续",
+"修一下", or "运行测试" should be workflow if it refers to prior workspace work.
+
 Return only JSON with this shape:
 {"route":"chat"|"workflow","reason":"brief reason","confidence":0.0}
 
@@ -74,6 +78,9 @@ Answer the user directly and concisely. Do not claim that you read files,
 searched the web, ran commands, edited files, or inspected the workspace.
 If the user asks for work requiring tools or project context, say that it
 should be handled by the workflow route.
+
+If session context is provided, you may use the recent conversation summary to
+answer conversational follow-ups, but do not invent workspace facts.
 """
 
 
@@ -88,7 +95,7 @@ def intent_router_node(state: Agent01GraphState) -> dict[str, Any]:
         response = create_model().invoke(
             [
                 SystemMessage(content=INTENT_ROUTER_PROMPT),
-                HumanMessage(content=f"User input:\n{state.get('task', '')}"),
+                HumanMessage(content=_router_input(state)),
             ]
         )
         parsed = _extract_json(str(response.content)) or {}
@@ -125,14 +132,14 @@ def intent_route_fn(state: Agent01GraphState) -> str:
 
 
 def chat_responder_node(state: Agent01GraphState) -> dict[str, Any]:
-    """直接回答当前输入，不读取工作区、不调用工具，也不携带此前轮次的聊天历史。"""
+    """直接回答当前输入，可参考传入的会话历史，但不读取工作区、不调用工具。"""
     #writer 发送显示事件；return 返回状态字段更新，两者用途不同。
     writer = _get_writer()
     try:
         response = create_model().invoke(
             [
                 SystemMessage(content=CHAT_RESPONDER_PROMPT),
-                HumanMessage(content=str(state.get("task", ""))),
+                HumanMessage(content=_chat_input(state)),
             ]
         )
         text = str(getattr(response, "content", "") or "").strip()
@@ -715,21 +722,49 @@ def _important_files_from_state(state: Agent01GraphState) -> list[str]:
 
 
 def _planner_input(state: Agent01GraphState, memory: dict[str, Any]) -> str:
-    return (
-        f"Task: {state['task']}\n"
-        f"Attempt: {state.get('attempts', 0) + 1}\n\n"
-        "Layered memory snapshot:\n"
-        f"{format_layered_memory_for_prompt(memory)}"
-    )
+    """把本轮任务、尝试次数、会话上下文和分层记忆整理成 planner 输入。
+    历史帮助解释本轮目标；实际文件状态仍需由工具检查。
+    """
+    parts = [
+        f"Task: {state['task']}",
+        f"Attempt: {state.get('attempts', 0) + 1}",
+    ]
+    if state.get("session_context"):
+        parts.append("Session context for this multi-turn coding session:\n" + str(state.get("session_context", "")))
+    parts.append("Layered memory snapshot:\n" + format_layered_memory_for_prompt(memory))
+    return "\n\n".join(parts)
 
 
 def _verifier_input(state: Agent01GraphState, memory: dict[str, Any]) -> str:
-    return (
-        f"Task: {state['task']}\n\n"
-        "Layered memory snapshot:\n"
-        f"{format_layered_memory_for_prompt(memory)}\n\n"
-        "Inspect the workspace with tools and return only verifier JSON."
-    )
+    """把本轮任务和会话背景交给验收节点，并附上分层记忆及验收格式要求。
+    这样 verifier 能理解本轮是在原有成果上继续修改。
+    """
+    parts = [f"Task: {state['task']}"]
+    if state.get("session_context"):
+        parts.append("Session context for this multi-turn coding session:\n" + str(state.get("session_context", "")))
+    parts.append("Layered memory snapshot:\n" + format_layered_memory_for_prompt(memory))
+    parts.append("Inspect the workspace with tools and return only verifier JSON.")
+    return "\n\n".join(parts)
+
+
+def _router_input(state: Agent01GraphState) -> str:
+    """拼接当前输入和可选会话上下文，让分类器理解“继续”“修一下”等追问。
+    没有 session_context 时仍兼容旧的单次任务入口。
+    """
+    parts = [f"User input:\n{state.get('task', '')}"]
+    if state.get("session_context"):
+        parts.append("Session context:\n" + str(state.get("session_context", "")))
+    return "\n\n".join(parts)
+
+
+def _chat_input(state: Agent01GraphState) -> str:
+    """将当前问题与历史会话文本一起发送给聊天模型。
+    会话文本用于理解追问，不代表模型已经读取了工作区真实文件。
+    """
+    parts = [f"User input:\n{state.get('task', '')}"]
+    if state.get("session_context"):
+        parts.append("Session context:\n" + str(state.get("session_context", "")))
+    return "\n\n".join(parts)
 
 
 def _default_plan(task: str) -> dict[str, Any]:

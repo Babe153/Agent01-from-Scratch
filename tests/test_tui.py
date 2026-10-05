@@ -36,12 +36,16 @@ def test_tui_options_are_accepted(monkeypatch) -> None:
 
     monkeypatch.setattr("Agent01.cli.tui.Agent01TuiApp", FakeApp)
 
-    result = runner.invoke(app, ["tui", "--trace-mode", "off", "--checkpoint-mode", "strict", "--approval-mode", "deny"])
+    result = runner.invoke(
+        app,
+        ["tui", "--trace-mode", "off", "--checkpoint-mode", "strict", "--approval-mode", "deny", "--workspace", "demo-workspace"],
+    )
 
     assert result.exit_code == 0
     assert captured["trace_mode"] == "off"
     assert captured["checkpoint_mode"] == "strict"
     assert captured["approval_mode"] == "deny"
+    assert captured["workspace"] == Path("demo-workspace")
 
 
 def test_natural_task_entry_still_works(monkeypatch, tmp_path) -> None:
@@ -76,6 +80,7 @@ def test_logo_renderer_falls_back_for_missing_asset(tmp_path) -> None:
 
 def test_tui_renders_fake_stream_events(tmp_path) -> None:
     def fake_stream(*args, **kwargs):
+        yield {"type": "custom_event", "event": {"type": "session_started", "session_id": "session-demo", "workspace": str(tmp_path / "workspace-a")}}
         yield {"type": "workspace", "path": str(tmp_path / "workspace-a")}
         yield {
             "type": "custom_event",
@@ -107,6 +112,7 @@ def test_tui_renders_fake_stream_events(tmp_path) -> None:
         async with app.run_test(size=(120, 36)) as pilot:
             await pilot.pause(0.3)
             #Windows 临时路径较长，侧栏按设计截短；同时验证原始路径和显示结果。
+            assert "session-demo" in app.sidebar_text
             assert app.latest_workspace == str(tmp_path / "workspace-a")
             assert app.latest_trace == str(tmp_path / "trace-demo")
             assert shorten(app.latest_workspace, 80) in app.sidebar_text
@@ -131,15 +137,15 @@ def test_tui_input_bar_stays_visible() -> None:
     asyncio.run(run())
 
 
-def test_tui_runs_multiple_tasks_with_fresh_workspace_default(tmp_path) -> None:
+def test_tui_runs_multiple_tasks_in_same_session_workspace(tmp_path) -> None:
     calls = []
 
     def fake_stream(*args, **kwargs):
         calls.append((args, kwargs))
-        yield {"type": "workspace", "path": str(tmp_path / f"workspace-{len(calls)}")}
+        yield {"type": "workspace", "path": str(kwargs["session_workspace"])}
 
     async def run() -> None:
-        app = Agent01TuiApp(stream_factory=fake_stream)
+        app = Agent01TuiApp(workspace=tmp_path / "session-workspace", stream_factory=fake_stream)
         async with app.run_test(size=(100, 30)) as pilot:
             app.start_task("first")
             await pilot.pause(0.2)
@@ -149,8 +155,8 @@ def test_tui_runs_multiple_tasks_with_fresh_workspace_default(tmp_path) -> None:
     asyncio.run(run())
 
     assert len(calls) == 2
-    assert calls[0][1]["workspace"] is None
-    assert calls[1][1]["workspace"] is None
+    assert calls[0][1]["session_workspace"] == tmp_path / "session-workspace"
+    assert calls[1][1]["session_workspace"] == tmp_path / "session-workspace"
     assert calls[0][0][0] == "first"
     assert calls[1][0][0] == "second"
 
@@ -207,7 +213,20 @@ def test_tui_renders_lightweight_chat_response() -> None:
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause(0.2)
             assert app.run_count == 1
-            assert not app.latest_workspace
+            assert app.latest_workspace
             assert not app.running
+
+    asyncio.run(run())
+
+
+def test_tui_new_session_command_switches_workspace(tmp_path) -> None:
+    async def run() -> None:
+        app = Agent01TuiApp(workspace=tmp_path / "first", stream_factory=lambda *args, **kwargs: [])
+        async with app.run_test(size=(100, 30)) as pilot:
+            old_workspace = app.session_workspace
+            app.start_new_session()
+            await pilot.pause(0.1)
+            assert app.session_workspace != old_workspace
+            assert app.latest_workspace == str(app.session_workspace)
 
     asyncio.run(run())

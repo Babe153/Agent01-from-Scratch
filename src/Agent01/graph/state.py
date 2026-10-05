@@ -78,6 +78,10 @@ class Agent01GraphState(TypedDict, total=False): #total=False 这表示下面声
     intent_reason: str
     intent_confidence: float
     chat_response: str
+    #跨轮会话标识、当前轮次，以及实际拼进模型提示词的历史文本。
+    session_id: str
+    session_turn: int
+    session_context: str
     last_actor_summary: str #保存最近一个执行节点完成了什么
 
     research_notes: str

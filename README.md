@@ -6,7 +6,55 @@
 
 <p align="center">逐文件阅读、重建一个 Agent，理解工具调用、任务调度与上下文管理。</p>
 
-## 意图路由阶段（当前：`c6866c8`）
+## 多轮会话阶段（当前：`fb83ffd`）
+
+TUI 现在使用 `stream_session_events()`，同一会话内的输入复用工作区，并把历史记录整理成 `session_context` 传给模型。原来的普通命令行任务仍使用 `stream_agent_events()`，不自动变成多轮会话。以下旧阶段章节描述当时行为，以本节为当前行为说明。
+
+```powershell
+uv run Agent01 tui
+# 在指定工作区开始或继续会话；这里的路径是你希望复用的任务工作区
+uv run Agent01 tui --workspace "D:/my-agent-workspace"
+```
+
+在输入框发送 `/new` 会切换到新的会话工作区，不删除旧会话。Ctrl+L 只清空显示，不清除历史。重新打开 TUI 想继续原会话时，用 `--workspace` 指向原路径；继续对话与通过 `--resume` 加载任务 checkpoint 是两件事。
+
+### 一轮输入如何处理
+
+```mermaid
+flowchart TD
+    A[TUI 接收本轮输入] --> B[加载当前工作区 session]
+    B --> C[追加用户记录并保存]
+    C --> D[build_session_context 整理近期记录和摘要]
+    D --> E[入口图根据当前输入和历史分类]
+    E -->|chat| F[聊天模型带历史直接回复]
+    E -->|workflow| G[同一工作区执行复杂任务图]
+    G --> H[提取 final 节点回答]
+    F --> I[追加助手回答]
+    H --> I
+    I --> J[保存 session 和摘要，发送保存事件]
+    J --> A
+```
+
+分类器、聊天节点、planner、code agent 和 verifier 的输入都会包含可选的会话文本；分层记忆也加入会话标识、轮次和上下文。模型不是自己永久记忆，而是程序每次重新提供历史。每轮复杂任务仍重新运行图，不是从上一轮 Python 调用栈接着执行。
+
+### 文件实际保存在哪里
+
+```text
+任务工作区/
+├── .Agent01/session/session.json    # 会话标识、轮次、近期记录、旧记录摘要等
+├── SESSION_SUMMARY.md               # 供人阅读的会话摘要
+└── ...                             # 同一会话生成、修改的项目文件
+```
+
+聊天也创建工作区及会话文件，但不启动复杂任务的 Checkpoint/Trace。复杂任务继续使用审批、Checkpoint 和 Trace。会话入口的 `resume` 在此参考版本中仍经过分类，仅进入 workflow 分支后才加载 checkpoint；TUI 仅传恢复路径而不提供初始任务也不会自动执行。
+
+会话记录会截断：保存最多 18 条近期记录（用户和助手各算一条），较旧记录以代码拼接形式整理进最多 5000 字符的摘要；模型上下文选取最近 10 条记录等内容，整体最多 7000 字符。因此这不是完整聊天记录的无限归档，也不是通过额外模型调用生成的会话摘要。
+
+本地适配修复：`workspace_manifest()` 返回项没有 `type` 字段，已经只包含文件；`build_session_context()` 因此直接从清单选取文件路径，并排除会话内部目录，避免 `recent_files` 始终为空。
+
+建议阅读：`core/session.py` → `core/agent.py` 的 `stream_session_events()` → `graph/nodes.py` 的输入拼接函数 → `cli/tui/app.py`。原有 Logo、布局和学习注释保留。
+
+## 意图路由阶段（历史版本：`c6866c8`）
 
 本阶段在原有复杂任务工作流之前增加独立的入口图，用模型判断输入应该直接聊天，还是需要调用工具完成任务。TUI 和普通终端模式共用这套后端流程。
 

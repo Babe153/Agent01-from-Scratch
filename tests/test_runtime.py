@@ -343,6 +343,74 @@ def test_stream_agent_events_resume_skips_entry_router(monkeypatch, tmp_path: Pa
     assert any(event.get("type") == "custom_event" and event["event"].get("type") == "checkpoint_resumed" for event in events)
 
 
+def test_stream_session_events_chat_writes_session_without_harness(monkeypatch, tmp_path: Path) -> None:
+    from Agent01.core.agent import stream_session_events
+
+    class FakeEntryWorkflow:
+        def stream(self, inputs, stream_mode):
+            assert inputs["session_context"]
+            yield (
+                "custom",
+                {"type": "intent_decision", "route": "chat", "reason": "greeting", "confidence": 0.9},
+            )
+            yield ("updates", {"chat_responder": {"chat_response": "你好，我在。", "final_answer": "你好，我在。"}})
+
+    def fail_complex_workflow():
+        raise AssertionError("complex workflow should not run for chat route")
+
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", lambda: FakeEntryWorkflow())
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", fail_complex_workflow)
+
+    events = list(stream_session_events("你好", session_workspace=tmp_path, checkpoint_mode="light", trace_mode="on", approval_mode="deny"))
+
+    custom_types = [event["event"]["type"] for event in events if event.get("type") == "custom_event"]
+    assert "session_started" in custom_types
+    assert "session_turn_saved" in custom_types
+    assert not (tmp_path / ".Agent01" / "checkpoints").exists()
+    assert not (tmp_path / ".Agent01" / "traces").exists()
+    assert (tmp_path / ".Agent01" / "session" / "session.json").exists()
+    assert (tmp_path / "SESSION_SUMMARY.md").exists()
+
+
+def test_stream_session_events_workflow_reuses_workspace_and_session_context(monkeypatch, tmp_path: Path) -> None:
+    from Agent01.core.agent import stream_session_events
+
+    captured = {}
+
+    class FakeEntryWorkflow:
+        def stream(self, inputs, stream_mode):
+            yield (
+                "custom",
+                {"type": "intent_decision", "route": "workflow", "reason": "needs files", "confidence": 0.9},
+            )
+
+    class FakeWorkflow:
+        def stream(self, inputs, stream_mode):
+            captured["workspace"] = inputs["runtime"].workspace
+            captured["session_context"] = inputs.get("session_context", "")
+            captured["session_turn"] = inputs.get("session_turn")
+            yield ("updates", {"final": {"final_answer": "PASSED: done"}})
+
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", lambda: FakeEntryWorkflow())
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", lambda: FakeWorkflow())
+
+    events = list(
+        stream_session_events(
+            "帮我创建 app.py",
+            session_workspace=tmp_path,
+            checkpoint_mode="off",
+            trace_mode="off",
+            approval_mode="deny",
+        )
+    )
+
+    assert captured["workspace"] == tmp_path
+    assert captured["session_turn"] == 1
+    assert "帮我创建 app.py" in captured["session_context"]
+    assert any(event.get("type") == "workspace" and event.get("path") == str(tmp_path) for event in events)
+    assert (tmp_path / ".Agent01" / "session" / "session.json").exists()
+
+
 class _WorkflowEntry:
     def stream(self, inputs, stream_mode):
         yield (
