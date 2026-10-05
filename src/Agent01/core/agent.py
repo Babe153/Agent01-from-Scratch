@@ -13,7 +13,7 @@ from Agent01.core.paths import default_workspace
 from Agent01.core.state import RuntimeState
 from Agent01.core.trace import TraceRecorder, normalize_trace_mode
 from Agent01.tools import build_tools
-from Agent01.graph.workflow import build_workflow
+from Agent01.graph.workflow import build_complex_workflow, build_entry_workflow
 
 def create_runtime(
     workspace: Path | None = None,
@@ -57,6 +57,23 @@ def stream_agent_events(
 ) -> Iterator[dict[str, Any]]:
     #恢复任务时复用原工作区，不创建新的任务目录。
     resume_path = resume_workspace.expanduser() if resume_workspace is not None else None
+    #新输入先分类；恢复任务直接沿用已有工作区，跳过入口图。
+    if resume_path is None:
+        #默认按复杂任务处理，只有明确的 chat 决策才提前结束。
+        route = "workflow"
+        entry_state: dict[str, Any] = {"task": task or "", "messages": []}
+        for mode, event in build_entry_workflow().stream(entry_state, stream_mode=["updates", "custom"]):
+            if mode == "custom":
+                yield {"type": "custom_event", "event": event}
+                if isinstance(event, dict) and event.get("type") == "intent_decision":
+                    route = str(event.get("route") or "workflow")
+            else:
+                _merge_graph_update(entry_state, event)
+                yield {"type": "graph_event", "event": event}
+        #轻量聊天在创建 runtime、工作区、Checkpoint 和 Trace 之前结束。
+        if route == "chat":
+            return
+
     selected_workspace = resume_path or workspace
     state = create_runtime(
         selected_workspace,
@@ -66,7 +83,7 @@ def stream_agent_events(
         resume_from=resume_path,
         trace_mode=trace_mode,
     )
-    workflow = build_workflow()
+    workflow = build_complex_workflow()
     yield {"type": "workspace", "path": str(state.workspace)}
 
     #恢复时加载旧进度；普通启动时构造一份空的初始状态。

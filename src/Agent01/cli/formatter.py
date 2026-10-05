@@ -56,6 +56,13 @@ def print_event(event: dict[str, Any]) -> None:
 
 def print_custom_event(event: dict[str, Any]) -> None:
     event_type = event.get("type")
+    #与 TUI 使用同样的事件协议，分别显示分类和回答。
+    if event_type == "intent_decision":
+        render_intent_decision(event)
+        return
+    if event_type == "chat_response":
+        render_chat_response(event)
+        return
     if event_type == "plan_snapshot":
         render_plan(event, title=f"Plan Snapshot · {event.get('node', 'graph')}")
         return
@@ -118,6 +125,26 @@ def print_custom_event(event: dict[str, Any]) -> None:
         render_trace_summary(event)
         return
     console.print(Panel(_shorten(event, 1000), title="Event", box=box.ROUNDED))
+
+def render_intent_decision(event: dict[str, Any]) -> None:
+    #普通 Rich 终端模式的显示函数，不负责执行分类或模型请求。
+    lines = [
+        f"route: {event.get('route', '')}",
+        f"confidence: {event.get('confidence', 0)}",
+        f"reason: {_shorten(event.get('reason', ''), 600)}",
+    ]
+    style = "cyan" if event.get("route") == "chat" else "magenta"
+    console.print(Panel("\n".join(lines), title="Intent Router", border_style=style, box=box.ROUNDED))
+
+
+def render_chat_response(event: dict[str, Any]) -> None:
+    #普通 Rich 终端模式的显示函数，不负责执行分类或模型请求。
+    lines = [_shorten(event.get("response", ""), 1600)]
+    reason = event.get("reason")
+    if reason:
+        lines.append(f"\nmode: {event.get('mode', 'lightweight')} | reason: {reason}")
+    console.print(Panel("\n".join(lines), title="Agent01", border_style="cyan", box=box.ROUNDED))
+
 
 def print_graph_event(payload: dict[str, Any]) -> None:
     if not isinstance(payload, dict):

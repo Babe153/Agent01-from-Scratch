@@ -73,6 +73,11 @@ class Agent01GraphState(TypedDict, total=False): #total=False 这表示下面声
     attempts: int #记录当前已经尝试修改或验证了多少次
     max_attempts: int #表示最多允许尝试多少次
     final_answer: str #保存最终准备返回给用户的答案
+    #入口图的分类结果、解释、置信度，以及轻量聊天回答。
+    intent_route: str
+    intent_reason: str
+    intent_confidence: float
+    chat_response: str
     last_actor_summary: str #保存最近一个执行节点完成了什么
 
     research_notes: str

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from Agent01.cli.formatter import render_intent_decision, render_chat_response
 
 from Agent01.cli.formatter import render_trace_summary
 
@@ -257,3 +258,34 @@ def test_print_custom_event_handles_trace_summary(capsys) -> None:
     output = capsys.readouterr().out
     assert "Trace Summary" in output
     assert "interrupted" in output
+
+
+def test_render_chat_response(capsys) -> None:
+    render_chat_response(
+        {
+            "type": "chat_response",
+            "mode": "lightweight",
+            "reason": "greeting",
+            "response": "你好，我在。",
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "Agent01" in output
+    assert "你好" in output
+
+
+def test_render_intent_decision(capsys) -> None:
+    render_intent_decision(
+        {
+            "type": "intent_decision",
+            "route": "chat",
+            "reason": "greeting",
+            "confidence": 0.91,
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "Intent Router" in output
+    assert "chat" in output
+    assert "0.91" in output

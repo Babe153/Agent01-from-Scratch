@@ -84,7 +84,8 @@ def test_stream_agent_events_saves_checkpoint_on_keyboard_interrupt(monkeypatch,
             yield ("updates", {"planner": {"plan_summary": "plan", "messages": []}})
             raise KeyboardInterrupt
 
-    monkeypatch.setattr("Agent01.core.agent.build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", lambda: _WorkflowEntry())
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", lambda: FakeWorkflow())
 
     events = list(
         stream_agent_events(
@@ -123,7 +124,8 @@ def test_stream_agent_events_writes_trace_summary_on_finish(monkeypatch, tmp_pat
             yield ("custom", {"type": "tool_result", "node": "codeAgent", "name": "BashTool", "result": {"ok": True}})
             yield ("updates", {"final": {"final_answer": "LangGraph MultiAgent workflow finished: PASSED"}})
 
-    monkeypatch.setattr("Agent01.core.agent.build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", lambda: _WorkflowEntry())
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", lambda: FakeWorkflow())
 
     events = list(
         stream_agent_events(
@@ -150,7 +152,8 @@ def test_stream_agent_events_writes_trace_summary_on_keyboard_interrupt(monkeypa
             yield ("updates", {"planner": {"plan_summary": "plan", "messages": []}})
             raise KeyboardInterrupt
 
-    monkeypatch.setattr("Agent01.core.agent.build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", lambda: _WorkflowEntry())
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", lambda: FakeWorkflow())
 
     events = list(
         stream_agent_events(
@@ -175,7 +178,8 @@ def test_stream_agent_events_trace_off_creates_no_trace_dir(monkeypatch, tmp_pat
         def stream(self, inputs, stream_mode):
             yield ("updates", {"final": {"final_answer": "PASSED"}})
 
-    monkeypatch.setattr("Agent01.core.agent.build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", lambda: _WorkflowEntry())
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", lambda: FakeWorkflow())
 
     events = list(
         stream_agent_events(
@@ -206,7 +210,8 @@ def test_stream_agent_events_trace_records_resume(monkeypatch, tmp_path: Path) -
         status="interrupted",
         latest_node="planner",
     )
-    monkeypatch.setattr("Agent01.core.agent.build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", lambda: _WorkflowEntry())
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", lambda: FakeWorkflow())
 
     list(
         stream_agent_events(
@@ -243,7 +248,8 @@ def test_stream_agent_events_checkpoints_only_at_safety_points(monkeypatch, tmp_
             )
             yield ("updates", {"final": {"final_answer": "LangGraph MultiAgent workflow finished: PASSED"}})
 
-    monkeypatch.setattr("Agent01.core.agent.build_workflow", lambda: FakeWorkflow())
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", lambda: _WorkflowEntry())
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", lambda: FakeWorkflow())
 
     events = list(
         stream_agent_events(
@@ -259,3 +265,87 @@ def test_stream_agent_events_checkpoints_only_at_safety_points(monkeypatch, tmp_
     assert trace_events
     # started + planner graph update + failed/approval tool result + final graph update + finished
     assert trace_events[-1]["checkpoint_count"] == 5
+
+
+def test_stream_agent_events_routes_model_chat_without_workspace(monkeypatch, tmp_path: Path) -> None:
+    from Agent01.core.agent import stream_agent_events
+
+    class FakeEntryWorkflow:
+        def stream(self, inputs, stream_mode):
+            yield (
+                "custom",
+                {"type": "intent_decision", "route": "chat", "reason": "model classified as greeting", "confidence": 0.91},
+            )
+            yield (
+                "custom",
+                {"type": "chat_response", "mode": "lightweight", "reason": "model classified as greeting", "response": "你好，我在。"},
+            )
+
+    def fail_complex_workflow():
+        raise AssertionError("complex workflow should not be built for chat route")
+
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", lambda: FakeEntryWorkflow())
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", fail_complex_workflow)
+
+    events = list(stream_agent_events("你好", workspace=tmp_path, approval_mode="deny"))
+
+    assert [event["event"]["type"] for event in events if event.get("type") == "custom_event"] == ["intent_decision", "chat_response"]
+    assert not (tmp_path / ".Agent01").exists()
+
+
+def test_stream_agent_events_routes_model_workflow_to_complex_graph(monkeypatch, tmp_path: Path) -> None:
+    from Agent01.core.agent import stream_agent_events
+
+    class FakeEntryWorkflow:
+        def stream(self, inputs, stream_mode):
+            yield (
+                "custom",
+                {"type": "intent_decision", "route": "workflow", "reason": "deliverable requested", "confidence": 0.94},
+            )
+
+    class FakeWorkflow:
+        def stream(self, inputs, stream_mode):
+            yield ("updates", {"final": {"final_answer": "PASSED"}})
+
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", lambda: FakeEntryWorkflow())
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", lambda: FakeWorkflow())
+
+    events = list(stream_agent_events("帮我创建一个 HTML 页面", workspace=tmp_path, checkpoint_mode="off", trace_mode="off", approval_mode="deny"))
+
+    assert events[0]["event"]["type"] == "intent_decision"
+    assert any(event.get("type") == "workspace" for event in events)
+
+
+def test_stream_agent_events_resume_skips_entry_router(monkeypatch, tmp_path: Path) -> None:
+    from Agent01.core.agent import stream_agent_events
+    from Agent01.core.checkpoint import CheckpointManager
+    from Agent01.core.state import RuntimeState
+
+    class FakeWorkflow:
+        def stream(self, inputs, stream_mode):
+            yield ("updates", {"final": {"final_answer": "PASSED"}})
+
+    runtime = RuntimeState(workspace=tmp_path, checkpoint_mode="light")
+    CheckpointManager(runtime, task="original task").save(
+        {"task": "original task", "runtime": runtime, "messages": [], "max_attempts": 3},
+        status="interrupted",
+        latest_node="planner",
+    )
+
+    def fail_entry_workflow():
+        raise AssertionError("resume should skip entry router")
+
+    monkeypatch.setattr("Agent01.core.agent.build_entry_workflow", fail_entry_workflow)
+    monkeypatch.setattr("Agent01.core.agent.build_complex_workflow", lambda: FakeWorkflow())
+
+    events = list(stream_agent_events(workspace=tmp_path, resume_workspace=tmp_path, checkpoint_mode="off", trace_mode="off", approval_mode="deny"))
+
+    assert any(event.get("type") == "custom_event" and event["event"].get("type") == "checkpoint_resumed" for event in events)
+
+
+class _WorkflowEntry:
+    def stream(self, inputs, stream_mode):
+        yield (
+            "custom",
+            {"type": "intent_decision", "route": "workflow", "reason": "test workflow route", "confidence": 0.9},
+        )

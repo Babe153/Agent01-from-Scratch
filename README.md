@@ -6,6 +6,52 @@
 
 <p align="center">逐文件阅读、重建一个 Agent，理解工具调用、任务调度与上下文管理。</p>
 
+## 意图路由阶段（当前：`c6866c8`）
+
+本阶段在原有复杂任务工作流之前增加独立的入口图，用模型判断输入应该直接聊天，还是需要调用工具完成任务。TUI 和普通终端模式共用这套后端流程。
+
+### 处理流程
+
+```mermaid
+flowchart TD
+    A[用户输入 / stream_agent_events] --> B{是否指定 resume 路径}
+    B -->|是| R[跳过分类，读取已有工作区和进度]
+    B -->|否| C[入口图：intent_router 调用模型分类]
+    C --> D{合法路由且置信度 ≥ 0.55？}
+    D -->|否或调用异常| W[workflow 分支]
+    D -->|是| E{分类结果}
+    E -->|chat| F[chat_responder 再调用模型直接回答]
+    F --> G[发送 chat_response，结束本次请求]
+    E -->|workflow| W
+    W --> H[入口图结束，core/agent.py 创建运行环境和工作区]
+    H --> I[启动原有复杂任务图]
+    R --> I
+    I --> J[planner 调度专家、上下文管理、verifier 验收与重试]
+    J --> K[final 输出结果；沿用 Checkpoint 和 Trace]
+```
+
+### 如何决定分支
+
+- `chat`：问候、感谢、身份说明、不需要工作区或工具的概念问答。例如“你好”“什么是 Python 字典”。
+- `workflow`：读写文件、执行命令、安装依赖、联网搜索、检查项目、验证产物或制作具体交付物。例如“帮我创建 HTML 页面”。
+- 分类结果包含 `route`、`reason`、`confidence`。只有路由合法且置信度至少为 `0.55` 才采用；无效 JSON、低置信度或模型异常时默认走 `workflow`。
+
+### 状态、事件和两张图如何配合
+
+`intent_router_node()` 返回 `intent_route`、`intent_reason`、`intent_confidence` 更新入口图状态，同时通过 writer 发送 `intent_decision` 事件供界面显示。条件边根据状态选择分支；`core/agent.py` 则读取该自定义事件，决定入口图结束后是否继续创建复杂任务图。
+
+入口图中 `intent_route_fn()` 返回的 `planner` 是条件边标签，它映射到 `END`，并不是在入口图里直接调用 planner。复杂任务图由外层程序随后单独启动。`build_workflow()` 保留为兼容接口，仍然返回复杂任务图。
+
+聊天分支不绑定工具，分类与回复通常共调用模型两次。它在创建 RuntimeState 前结束，因此本版本的轻量聊天不创建任务工作区，也不生成该轮 Checkpoint/Trace；这不代表聊天不调用模型。复杂任务通常会多一次分类模型调用。恢复任务跳过分类，直接加载旧进度。
+
+`chat_responder_node()` 将回答写入 `chat_response` 和 `final_answer`，并发送 `chat_response` 事件。TUI 的 `event_summary.py` 和普通终端的 `formatter.py` 分别展示分类结果与回答。聊天请求失败时显示说明，空回复时使用默认文本。
+
+### 本阶段范围
+
+入口图每次使用当前任务和空消息列表，尚未保留多轮聊天历史；同一 TUI 内连续输入并不意味着模型记得上一轮。入口分类发生在 Trace 创建之前，因此这一版本的 Trace 主要记录后续复杂任务阶段。
+
+推荐阅读顺序：`graph/state.py` → `graph/nodes.py` → `graph/workflow.py` → `core/agent.py` → `cli/event_summary.py` / `cli/formatter.py`。以下章节保留之前阶段的学习记录。
+
 ## TUI 阶段更新
 
 已接入参考版本 `89c4ee4` 的 Textual 终端界面，使用本项目的 `logo.png`。运行：

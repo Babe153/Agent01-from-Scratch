@@ -37,6 +37,26 @@ def summarize_event(event: dict[str, Any]) -> EventSummary:
 
 def summarize_custom_event(event: dict[str, Any]) -> EventSummary:
     event_type = event.get("type", "event")
+    #把分类结果和聊天回复转换为 TUI 日志面板的显示摘要。
+    if event_type == "intent_decision":
+        route = str(event.get("route", "workflow"))
+        return EventSummary(
+            "Intent Router",
+            (
+                f"route: {route}\n"
+                f"confidence: {event.get('confidence', 0)}\n"
+                f"reason: {shorten(event.get('reason', ''), 600)}"
+            ),
+            "intent",
+            "cyan" if route == "chat" else "magenta",
+        )
+    if event_type == "chat_response":
+        return EventSummary(
+            "Agent01",
+            f"{shorten(event.get('response', ''), 900)}\nmode: {event.get('mode', 'lightweight')} | reason: {event.get('reason', '')}",
+            "chat",
+            "cyan",
+        )
     if event_type in {"plan_snapshot", "todo_update"}:
         return _summarize_plan(event, "Plan Snapshot" if event_type == "plan_snapshot" else "Todo Updated")
     if event_type == "tool_call":
