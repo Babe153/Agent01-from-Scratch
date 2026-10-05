@@ -17,7 +17,8 @@ EVENTS_FILE = "events.jsonl"
 SUMMARY_FILE = "summary.json"
 TIMELINE_FILE = "timeline.md"
 MAX_PAYLOAD_TEXT = 1200
-MAX_TIMELINE_ITEMS = 80
+TIMELINE_HEAD_ITEMS = 40
+TIMELINE_TAIL_ITEMS = 80
 
 
 def normalize_trace_mode(mode: str | None) -> str:
@@ -46,7 +47,10 @@ class TraceRecorder:
         self.checkpoint_count = 0
         self.handoff_count = 0
         self.final_status = ""
-        self.timeline: list[str] = []
+        #保留开头和最新事件，中间淘汰的数量单独记录。
+        self.timeline_head: list[str] = []
+        self.timeline_tail: list[str] = []
+        self.timeline_omitted = 0
         if self.enabled:
             setattr(runtime, "trace_id", self.trace_id)
             self.root.mkdir(parents=True, exist_ok=True)
@@ -162,7 +166,7 @@ class TraceRecorder:
         summary = self.summary_payload()
         try:
             write_json(self.root / SUMMARY_FILE, summary)
-            (self.root / TIMELINE_FILE).write_text(build_timeline_markdown(summary, self.timeline), encoding="utf-8")
+            (self.root / TIMELINE_FILE).write_text(build_timeline_markdown(summary, self.timeline_items()), encoding="utf-8")
         except Exception as exc:
             self.errors.append(f"{type(exc).__name__}: {exc}")
             summary = self.summary_payload()
@@ -190,14 +194,27 @@ class TraceRecorder:
             "handoff_count": self.handoff_count,
             "final_status": self.final_status,
             "errors": list(self.errors),
+            "timeline_omitted": self.timeline_omitted,
         }
 
     def elapsed_ms(self) -> int:
         return round((time.perf_counter() - self.started_at) * 1000)
 
     def _timeline(self, text: str) -> None:
-        if len(self.timeline) < MAX_TIMELINE_ITEMS:
-            self.timeline.append(text)
+        #前 40 条固定保留；后续只保留最近 80 条，不影响 events.jsonl 的记录。
+        if len(self.timeline_head) < TIMELINE_HEAD_ITEMS:
+            self.timeline_head.append(text)
+            return
+        if len(self.timeline_tail) >= TIMELINE_TAIL_ITEMS:
+            self.timeline_tail.pop(0)
+            self.timeline_omitted += 1
+        self.timeline_tail.append(text)
+
+    def timeline_items(self) -> list[str]:
+        #将首尾两段拼起来，并在中间提示省略了多少条。
+        if self.timeline_omitted <= 0:
+            return self.timeline_head + self.timeline_tail
+        return self.timeline_head + [f"... omitted {self.timeline_omitted} event(s) ..."] + self.timeline_tail
 
 
 def trace_summary_event(summary: dict[str, Any]) -> dict[str, Any]:

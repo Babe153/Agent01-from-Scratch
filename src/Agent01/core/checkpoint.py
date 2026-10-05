@@ -223,7 +223,8 @@ def build_light_resume_inputs(runtime: Any, *, task: str | None = None, max_atte
     history = read_workspace_text(runtime.workspace, "HISTORY_SUMMARY.md")
 
     original_task = str(checkpoint.get("task") or "").strip()
-    resume_task = task.strip() if isinstance(task, str) and task.strip() else original_task
+    #先去掉历史恢复前缀，再统一添加一次，避免反复恢复后任务描述不断变长。
+    resume_task = normalize_resume_task(task.strip() if isinstance(task, str) and task.strip() else original_task)
     if not resume_task:
         resume_task = "Continue the interrupted Agent01 task from the checkpoint."
     else:
@@ -270,6 +271,23 @@ def read_checkpoint(workspace: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def normalize_resume_task(task: str) -> str:
+    #循环剥离两种恢复前缀，兼容旧 checkpoint 中已经嵌套多层的情况。
+    prefixes = (
+        "Continue this Agent01 task from the checkpoint:",
+        "Continue the interrupted Agent01 task from the checkpoint:",
+    )
+    normalized = task.strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix) :].strip()
+                changed = True
+    return normalized
 
 
 def read_checkpoint_text(workspace: Path, name: str) -> str:

@@ -175,7 +175,7 @@ attempts: 1 / 3
 
 `RECOVERY.md` 是恢复用摘要。它会把任务、计划、todo、验收标准、验证命令、来源、最近总结和近期文件整理到一个短文档里。轻量恢复时，模型主要靠它和 workspace 文件理解“之前做到哪了”。
 
-如果你在 `RECOVERY.md` 的 Task 中看到多层 `Continue this Agent01 task from the checkpoint:`，通常说明这个 workspace 曾经被 `--resume` 恢复过多次。每次 light resume 都会把恢复语义合并进新任务描述。它不影响执行，但后续可以继续做去重优化，让展示更干净。
+旧版 `RECOVERY.md` 的 Task 里可能看到多层 `Continue this Agent01 task from the checkpoint:`，通常说明这个 workspace 曾经被 `--resume` 恢复过多次。当前实现会在 light resume 时去掉已有恢复前缀，再统一加一次恢复语义，避免任务描述越来越长。
 
 ## 目录什么时候创建
 
@@ -240,7 +240,7 @@ attempts: 1 / 3
 └─ git/
 ```
 
-运行过程中，每次 graph update 或 custom event 后都会刷新 checkpoint。任务结束时会写入 `status: finished`。如果用户按 `Ctrl+C`，会写入 `status: interrupted`，CLI 会提示：
+运行过程中，checkpoint 会在关键安全点刷新：开始运行、graph update、失败/审批类工具结果、中断和结束。普通 custom event 只进入 trace，不再每次都触发 workspace manifest 和 git snapshot。任务结束时会写入 `status: finished`。如果用户按 `Ctrl+C`，会写入 `status: interrupted`，CLI 会提示：
 
 ```text
 uv run Agent01 --resume <workspace>
@@ -248,7 +248,7 @@ uv run Agent01 --resume <workspace>
 
 ### checkpoint.json
 
-创建时机：每次 checkpoint 保存时刷新。
+创建时机：checkpoint 安全点保存时刷新。
 
 用途：
 
@@ -260,7 +260,7 @@ uv run Agent01 --resume <workspace>
 
 ### RECOVERY.md
 
-创建时机：每次 checkpoint 保存时刷新。
+创建时机：checkpoint 安全点保存时刷新。
 
 用途：
 
@@ -363,7 +363,7 @@ events.jsonl
 
 - `events.jsonl` 按顺序记录 run start/end、custom event、graph update、tool call/result、handoff、checkpoint 等结构化摘要。
 - `summary.json` 汇总节点访问次数、工具调用数、失败工具数、审批数、checkpoint 数、最终状态和 trace errors。
-- `timeline.md` 给人类快速扫一遍链路，不需要直接读 JSONL。
+- `timeline.md` 给人类快速扫一遍链路，不需要直接读 JSONL；长任务会保留开头和结尾，中间省略的事件数会明确标出。
 
 Trace 和 checkpoint 的区别：
 
@@ -403,7 +403,7 @@ flowchart LR
 限制：
 
 - 不是精确恢复到上一条 tool call。
-- 如果恢复多次，任务描述可能出现重复的 `Continue...` 前缀。
+- 恢复时会去重已有 `Continue...` 前缀，避免任务描述随着多次恢复不断变长。
 - 适合教学和一般长任务恢复，不适合需要事务级精确续跑的场景。
 
 ## strict resume 怎么工作
@@ -424,7 +424,7 @@ flowchart LR
     State -.失败.-> Fallback
 ```
 
-当前 strict 的定位是 state-backed restart，也就是尽量把已有 plan、todos、messages、sources、attempts 等 state 放回 workflow。它比 light 带的信息更多，但仍然保持安全降级，不会因为 state 反序列化失败而让任务无法继续。
+当前 strict 的定位是 state-backed restart，也就是尽量把已有 plan、todos、messages、sources、attempts 等 state 放回 workflow，然后从 workflow 入口重新推进；它不是精确恢复到上一个 tool call 的下一行。它比 light 带的信息更多，但仍然保持安全降级，不会因为 state 反序列化失败而让任务无法继续。
 
 ## 这套设计在教学上展示了什么
 

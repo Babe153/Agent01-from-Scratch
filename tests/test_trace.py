@@ -85,3 +85,19 @@ def test_trace_recorder_write_errors_do_not_raise(tmp_path: Path, monkeypatch) -
     trace.record_custom_event({"type": "tool_call", "name": "BashTool"})
 
     assert trace.errors
+
+
+def test_trace_timeline_keeps_head_and_tail_with_omission(tmp_path: Path) -> None:
+    runtime = RuntimeState(workspace=tmp_path, trace_mode="on")
+    trace = TraceRecorder(runtime, task="demo")
+
+    for idx in range(140):
+        trace.record("custom:test", {"event_type": f"event-{idx}"})
+    event = trace.end(status="finished")
+
+    assert event is not None
+    assert event["timeline_omitted"] > 0
+    timeline = (trace.root / "timeline.md").read_text(encoding="utf-8")
+    assert "event-0" in timeline
+    assert "event-139" in timeline
+    assert "omitted" in timeline
