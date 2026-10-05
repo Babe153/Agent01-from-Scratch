@@ -53,7 +53,7 @@ def summarize_custom_event(event: dict[str, Any]) -> EventSummary:
     if event_type == "chat_response":
         return EventSummary(
             "Agent01",
-            f"{shorten(event.get('response', ''), 900)}\nmode: {event.get('mode', 'lightweight')} | reason: {event.get('reason', '')}",
+            f"{shorten(event.get('response', ''), 2400)}\nmode: {event.get('mode', 'lightweight')} | reason: {event.get('reason', '')}",
             "chat",
             "cyan",
         )

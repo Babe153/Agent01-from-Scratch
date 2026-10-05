@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Iterable, Literal
 
-from rich.panel import Panel
+from rich.pretty import Pretty
 from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual.widgets import Collapsible, Footer, Header, Input, Static
 
 from Agent01.cli.event_summary import EventSummary, shorten, summarize_event
 from Agent01.cli.tui.approval import ApprovalGate, ApprovalModal
@@ -54,7 +55,8 @@ class ApprovalRequestedMessage(Message):
 class Agent01TuiApp(App[None]):
     CSS = """
     Screen {
-        background: $surface;
+        background: #101113;
+        color: #d7d1c9;
     }
 
     #root {
@@ -63,8 +65,9 @@ class Agent01TuiApp(App[None]):
 
     #top {
         height: 13;
-        border-bottom: solid $primary;
-        padding: 0 1;
+        border-bottom: solid #2f3437;
+        padding: 0 2;
+        background: #151719;
     }
 
     #logo {
@@ -76,16 +79,21 @@ class Agent01TuiApp(App[None]):
     #title-block {
         width: 1fr;
         height: 12;
-        padding-left: 1;
+        padding-left: 2;
+        content-align: left middle;
     }
 
     #title {
         text-style: bold;
-        color: $primary;
+        color: #f3ede3;
     }
 
     #status {
-        color: $text-muted;
+        color: #9aa4a6;
+    }
+
+    #subtitle {
+        color: #7fd6c2;
     }
 
     #body {
@@ -95,33 +103,41 @@ class Agent01TuiApp(App[None]):
     #events {
         width: 1fr;
         height: 100%;
-        border-right: solid $panel;
+        border-right: solid #2f3437;
+        padding: 1 1;
+        background: #101113;
     }
 
     #sidebar {
-        width: 34;
-        min-width: 28;
+        width: 36;
+        min-width: 30;
         height: 100%;
-        padding: 1;
+        padding: 1 1;
+        background: #151719;
     }
 
     #side-title {
         text-style: bold;
-        color: $accent;
+        color: #f4bf75;
         margin-bottom: 1;
+    }
+
+    #side-state {
+        color: #d7d1c9;
     }
 
     #input-row {
         height: 3;
-        border: round $primary;
+        border: round #4a8f86;
         padding: 0 1;
+        background: #151719;
     }
 
     #prompt {
         width: 3;
         height: 1;
         content-align: center middle;
-        color: $primary;
+        color: #7fd6c2;
         text-style: bold;
     }
 
@@ -129,15 +145,57 @@ class Agent01TuiApp(App[None]):
         width: 1fr;
         height: 1;
         border: none;
-        background: $surface;
+        background: #151719;
+        color: #f3ede3;
     }
 
     #hint {
-        color: $text-muted;
-        width: 30;
+        color: #8a9294;
+        width: 32;
         height: 1;
         padding-left: 1;
         content-align: right middle;
+    }
+
+    .event-card {
+        height: auto;
+        min-height: 1;
+        margin: 0 0 1 0;
+        padding: 0 1;
+        border-left: solid #3f474b;
+    }
+
+    .event-summary {
+        height: auto;
+        min-height: 1;
+    }
+
+    .event-running {
+        border-left: solid #f4bf75;
+    }
+
+    .event-success {
+        border-left: solid #7fd68a;
+    }
+
+    .event-error {
+        border-left: solid #ef6f6c;
+    }
+
+    .event-info {
+        border-left: solid #7fd6c2;
+    }
+
+    .event-user {
+        border-left: solid #f4bf75;
+        background: #222426;
+    }
+
+    .detail {
+        height: auto;
+        max-height: 12;
+        color: #b7b0a8;
+        padding: 0 1 1 1;
     }
     """
 
@@ -191,6 +249,7 @@ class Agent01TuiApp(App[None]):
         self._state_lock = Lock()
 
     def compose(self) -> ComposeResult:
+        #放大到 12 行字符，并同步增加顶部高度，保留更多 Logo 细节。
         """由 Textual 调用，声明界面控件的层级和排列顺序。
         yield 把控件交给框架；with Vertical/Horizontal 指定纵向或横向容器。
         界面包括顶部 Logo、事件日志、运行状态侧栏、任务输入框和快捷键栏。
@@ -199,16 +258,15 @@ class Agent01TuiApp(App[None]):
         yield Header(show_clock=True)
         with Vertical(id="root"):
             with Horizontal(id="top"):
-                #放大到 12 行字符，并同步增加顶部高度，保留更多 Logo 细节。
                 yield Static(render_logo(max_width=42, max_rows=12), id="logo")
                 with Vertical(id="title-block"):
-                    yield Static("Agent01 TUI", id="title")
+                    yield Static("Agent01", id="title")
                     yield Static("ready", id="status")
-                    yield Static("MultiAgent + Context/Harness Engineering", id="subtitle")
+                    yield Static("coding session with context + harness", id="subtitle")
             with Horizontal(id="body"):
-                yield RichLog(id="events", wrap=True, highlight=True, markup=True)
+                yield VerticalScroll(id="events")
                 with Vertical(id="sidebar"):
-                    yield Static("Run State", id="side-title")
+                    yield Static("Session", id="side-title")
                     yield Static("", id="side-state")
             with Horizontal(id="input-row"):
                 yield Static("❯", id="prompt")
@@ -283,10 +341,10 @@ class Agent01TuiApp(App[None]):
         self.exit()
 
     def action_clear_events(self) -> None:
-        """处理清屏快捷键：清空 RichLog，再写入欢迎信息。
+        """处理清屏快捷键：移除滚动容器中的全部卡片，再写入欢迎信息。
         仅改变日志区显示，不删除磁盘上的 Trace、Checkpoint 或任务文件。
         """
-        self.query_one("#events", RichLog).clear()
+        self.query_one("#events", VerticalScroll).remove_children()
         self._write_welcome()
 
     def start_task(self, task: str, resume: Path | None = None) -> None:
@@ -368,6 +426,9 @@ class Agent01TuiApp(App[None]):
         将摘要写入日志区，最后刷新侧栏；它不修改 LangGraph 的任务 state。
         """
         self._update_state_from_event(event)
+        if self._should_hide_event(event):
+            self._refresh_sidebar()
+            return
         summary = summarize_event(event)
         self._write_summary(summary)
         self._refresh_sidebar()
@@ -425,13 +486,12 @@ class Agent01TuiApp(App[None]):
         """查找事件日志控件，追加一块欢迎面板。
         启动界面和清屏后都会调用，说明输入任务即可开始，使用 /new 才切换会话工作区。
         """
-        log = self.query_one("#events", RichLog)
-        log.write(
-            Panel(
-                "Enter a message to start a persistent coding session. Use /new to open a fresh workspace.",
-                title="Agent01",
-                border_style="cyan",
-            )
+        self._mount_event_card(
+            "Agent01",
+            "Ask for a quick answer or coding work. Use /new to open a fresh workspace.",
+            category="info",
+            collapsed=True,
+            detail="Persistent TUI sessions keep one workspace across turns. Workflow turns still use approval, checkpoint, trace, and layered memory.",
         )
 
     def _write_run_start(self, task: str, resume: Path | None) -> None:
@@ -439,17 +499,25 @@ class Agent01TuiApp(App[None]):
         将任务文字截断到显示上限，附上新任务或恢复任务的信息，
         使用运行次数作为面板标题，便于区分连续提交的任务。
         """
-        mode = f"resume: {resume}" if resume is not None else f"session workspace: {self.session_workspace}"
-        self.query_one("#events", RichLog).write(
-            Panel(shorten(task, 1000) + f"\n\n{mode}", title=f"Turn {self.run_count}", border_style="magenta")
+        mode = f"resume: {resume}" if resume is not None else f"workspace: {self.session_workspace}"
+        self._mount_event_card(
+            f"You · turn {self.run_count}",
+            shorten(task, 500),
+            category="user",
+            collapsed=False,
+            detail=mode,
         )
 
     def _write_summary(self, summary: EventSummary) -> None:
-        """把 EventSummary 转换成 Rich Panel 并追加到日志。
-        标题、正文和边框颜色都来自摘要；正文为空时使用空格，保证面板可显示。
+        """把 EventSummary 转换成事件卡片并挂载到滚动区域。
+        正文先按类别压缩，再选择默认折叠状态；摘要原文供详情区使用。
         """
-        self.query_one("#events", RichLog).write(
-            Panel(summary.body or " ", title=summary.title, border_style=summary.style)
+        self._mount_event_card(
+            summary.title,
+            self._compact_body(summary),
+            category=self._event_category(summary),
+            collapsed=self._should_collapse(summary),
+            detail=summary.body,
         )
 
     def _refresh_sidebar(self) -> None:
@@ -532,6 +600,204 @@ class Agent01TuiApp(App[None]):
         self.tool_count = 0
         self.approval_count = 0
         self._refresh_sidebar()
-        self.query_one("#events", RichLog).write(
-            Panel(str(self.session_workspace), title="New Session", border_style="cyan")
+        self._mount_event_card(
+            "New Session",
+            str(self.session_workspace),
+            category="info",
+            collapsed=False,
         )
+
+
+    def _first_matching_line(self, body: str, prefixes: tuple[str, ...]) -> str:
+        """依次查找以指定任一前缀开头的行，返回第一条匹配文本。
+        startswith 接受前缀元组；没有匹配时返回空字符串，由调用方提供备用摘要。
+        """
+        for line in body.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(prefixes):
+                return stripped
+        return ""
+
+
+    def _line_value(self, body: str, key: str) -> str:
+        """从多行摘要中提取 key: 后面的文字，找不到时返回空字符串。
+        只按第一个冒号拆分，避免截断 Windows 路径等后续包含冒号的内容。
+        """
+        prefix = f"{key}:"
+        for line in body.splitlines():
+            if line.strip().startswith(prefix):
+                return line.split(":", 1)[1].strip()
+        return ""
+
+
+    def _category_class(self, category: str) -> str:
+        """返回对应的 CSS 类名，用于设置卡片左边框和背景。
+        未知类别按信息卡片显示。
+        """
+        return {
+            "running": "event-running",
+            "success": "event-success",
+            "error": "event-error",
+            "info": "event-info",
+            "user": "event-user",
+        }.get(category, "event-info")
+
+
+    def _category_style(self, category: str) -> str:
+        """返回分类对应的文字颜色；未知类别使用默认浅色。
+        返回值交给 Rich Text，不改变事件自身的数据。
+        """
+        return {
+            "running": "#f4bf75",
+            "success": "#7fd68a",
+            "error": "#ef6f6c",
+            "info": "#7fd6c2",
+            "user": "#f3ede3",
+        }.get(category, "#d7d1c9")
+
+
+    def _category_marker(self, category: str) -> str:
+        """返回运行、成功、错误、信息或用户消息对应的字符标记。
+        未知类别使用普通信息标记作为默认值。
+        """
+        return {
+            "running": "•",
+            "success": "✓",
+            "error": "!",
+            "info": "·",
+            "user": ">",
+        }.get(category, "·")
+
+
+    def _detail_renderable(self, detail: str) -> Any:
+        """把详情文本转换成 Rich 可显示对象，最多保留 1600 字符。
+        能够解析为 JSON 时使用 Pretty 展示结构，否则使用普通 Text。
+        """
+        text = detail or "(no details)"
+        if len(text) > 1600:
+            text = text[:1597] + "..."
+        try:
+            parsed = json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            return Text(text)
+        return Pretty(parsed, max_depth=4)
+
+
+    def _should_hide_event(self, event: dict[str, Any]) -> bool:
+        """过滤日志区中重复或低层次的信息，例如 workspace 和入口图节点更新。
+        _handle_event 已先更新侧栏状态，所以隐藏卡片并不丢弃这些状态变化；
+        Checkpoint/Trace 的文件记录也不受这里的显示过滤影响。
+        """
+        if event.get("type") == "workspace":
+            return True
+        payload = event.get("event")
+        if event.get("type") == "graph_event" and isinstance(payload, dict):
+            hidden_nodes = {"intent_router", "chat_responder"}
+            return all(node in hidden_nodes for node in payload)
+        if event.get("type") == "custom_event" and isinstance(payload, dict):
+            return payload.get("type") in {"session_started", "session_turn_started", "memory_snapshot"}
+        return False
+
+
+    def _event_category(self, summary: EventSummary) -> str:
+        """把业务事件类别映射为显示状态，供颜色、图标和 CSS 使用。
+        这是参考版本的简化规则：final/trace 显示成功，部分结果按 FAIL 字样判断错误，
+        因此图标只是显示规则，不是对实际任务结果的独立验证。
+        """
+        if summary.category in {"final", "trace"}:
+            return "success"
+        if summary.category in {"verifier", "tool_result"} and "FAIL" in summary.body:
+            return "error"
+        if summary.category in {"plan", "tool_call", "handoff", "context", "checkpoint"}:
+            return "running"
+        return "info"
+
+
+    def _should_collapse(self, summary: EventSummary) -> bool:
+        """决定是否默认折叠：聊天、最终回答和验收摘要直接展开，其他类别折叠。
+        这里返回的是卡片类型选择，不会修改磁盘上的事件记录。
+        """
+        return summary.category not in {"chat", "final", "verifier"}
+
+
+    def _compact_body(self, summary: EventSummary) -> str:
+        """按事件类别提取较短的显示正文，减少工具和状态信息占用空间。
+        聊天保留最多 2400 字符；其他类别提取状态、路径或首行，完整摘要另外交给详情区。
+        """
+        title = summary.title
+        body = summary.body or ""
+        if summary.category == "session":
+            return self._first_matching_line(body, ("route:", "turn:", "workspace:", "session:")) or shorten(body, 140)
+        if summary.category == "intent":
+            route = self._line_value(body, "route")
+            reason = self._line_value(body, "reason")
+            return f"route {route or 'workflow'}" + (f" · {shorten(reason, 90)}" if reason else "")
+        if summary.category == "chat":
+            return shorten(body.split("\nmode:")[0], 2400)
+        if summary.category == "plan":
+            todos = self._line_value(body, "todos")
+            first = body.splitlines()[0] if body.splitlines() else title
+            return shorten(first + (f" · todos {todos}" if todos else ""), 180)
+        if summary.category == "tool_call":
+            return shorten(body, 160)
+        if summary.category == "tool_result":
+            ok = self._line_value(body, "ok")
+            path = self._line_value(body, "path") or self._line_value(body, "stdout_path")
+            pieces = [f"ok={ok}" if ok else "tool result"]
+            if path:
+                pieces.append(path)
+            return shorten(" · ".join(pieces), 180)
+        if summary.category == "handoff":
+            return shorten(body, 180)
+        if summary.category == "memory":
+            return "memory snapshot updated"
+        if summary.category == "context":
+            return self._first_matching_line(body, ("tokens:", "compress:", "next:")) or shorten(body, 160)
+        if summary.category == "checkpoint":
+            status = self._line_value(body, "status") or self._line_value(body, "mode")
+            return f"checkpoint {status}" if status else "checkpoint updated"
+        if summary.category == "trace":
+            status = self._line_value(body, "status")
+            tools = self._line_value(body, "tools")
+            return " · ".join(part for part in [f"status {status}" if status else "", f"tools {tools}" if tools else ""] if part)
+        if summary.category == "final":
+            return shorten(body.splitlines()[0] if body.splitlines() else body, 220)
+        if summary.category == "verifier":
+            return shorten(body.splitlines()[0] if body.splitlines() else body, 180)
+        return shorten(body, 180)
+
+
+    def _mount_event_card(
+        self,
+        title: str,
+        body: str,
+        *,
+        category: str = "info",
+        collapsed: bool = True,
+        detail: str | None = None,
+    ) -> None:
+        """在滚动容器中挂载一张事件卡片，并滚动到末尾。
+        collapsed=True 时使用 Collapsible，点击标题可展开摘要和详情；
+        否则使用始终展开的 Vertical，只显示标题和摘要。分类决定颜色和标记。
+        """
+        events = self.query_one("#events", VerticalScroll)
+        title_text = f"{self._category_marker(category)} {title}"
+        summary = Static(Text(body or " ", style=self._category_style(category)), classes="event-summary")
+        detail_text = detail if detail is not None else body
+        if collapsed:
+            card = Collapsible(
+                summary,
+                Static(self._detail_renderable(detail_text), classes="detail"),
+                title=title_text,
+                collapsed=True,
+                classes=f"event-card {self._category_class(category)}",
+            )
+        else:
+            card = Vertical(
+                Static(Text(title_text, style=f"bold {self._category_style(category)}")),
+                summary,
+                classes=f"event-card {self._category_class(category)}",
+            )
+            card.styles.height = "auto"
+        events.mount(card)
+        events.scroll_end(animate=False)
