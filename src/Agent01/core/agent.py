@@ -11,6 +11,7 @@ from Agent01.core.checkpoint import CheckpointManager, load_resume_inputs, norma
 
 from Agent01.core.paths import default_workspace
 from Agent01.core.state import RuntimeState
+from Agent01.core.trace import TraceRecorder, normalize_trace_mode
 from Agent01.tools import build_tools
 from Agent01.graph.workflow import build_workflow
 
@@ -21,6 +22,7 @@ def create_runtime(
     approval_handler=None,
     checkpoint_mode: str | None = None,
     resume_from: Path | None = None,
+    trace_mode: str | None = None,
 ) -> RuntimeState:
     load_dotenv() #加载项目配置，供下面的 AGENT_BASH_* 环境变量读取
     #确定本次 Agent 使用哪个工作区，确保该工作区存在，然后创建一个 RuntimeState 工作区状态对象
@@ -38,6 +40,8 @@ def create_runtime(
         #显式参数优先；没有传入时读取环境配置，非法模式回退为 light。
         checkpoint_mode=normalize_checkpoint_mode(checkpoint_mode or os.getenv("AGENT_CHECKPOINT_MODE", "light")),
         resume_from=resume_from,
+        #命令行或调用参数优先，否则读取环境变量；默认开启 Trace。
+        trace_mode=normalize_trace_mode(trace_mode or os.getenv("AGENT_TRACE_MODE", "on")),
     )
 
 def stream_agent_events(
@@ -49,6 +53,7 @@ def stream_agent_events(
     approval_handler=None,
     checkpoint_mode: str | None = None,
     resume_workspace: Path | None = None,
+    trace_mode: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     #恢复任务时复用原工作区，不创建新的任务目录。
     resume_path = resume_workspace.expanduser() if resume_workspace is not None else None
@@ -59,13 +64,17 @@ def stream_agent_events(
         approval_handler=approval_handler,
         checkpoint_mode=checkpoint_mode,
         resume_from=resume_path,
+        trace_mode=trace_mode,
     )
     workflow = build_workflow()
     yield {"type": "workspace", "path": str(state.workspace)}
 
     #恢复时加载旧进度；普通启动时构造一份空的初始状态。
+    resumed = False
+    resume_event: dict[str, Any] | None = None
     if resume_path is not None:
         inputs, resume_event = load_resume_inputs(state, task=task, max_attempts=max_attempts)
+        resumed = True
         yield {"type": "custom_event", "event": resume_event}
     else:
         inputs = {
@@ -79,30 +88,52 @@ def stream_agent_events(
     #维护完整状态副本：工作流 updates 只包含当前节点修改的字段。
     current_state: dict[str, Any] = dict(inputs)
     manager = CheckpointManager(state, task=str(current_state.get("task", "")))
-    manager.save(current_state, status="started", latest_node="start")
+    #Trace 记录本次运行的过程；Checkpoint 保存可供恢复的进度。
+    trace = TraceRecorder(state, task=str(current_state.get("task", "")))
+    trace.start(current_state, resumed=resumed, resume_event=resume_event)
+    if resume_event is not None:
+        trace.record_custom_event(resume_event)
+    started_checkpoint = manager.save(current_state, status="started", latest_node="start")
+    if started_checkpoint:
+        trace.record_custom_event(started_checkpoint)
     latest_node = "start"
 
     try:
         for mode, event in workflow.stream(inputs, stream_mode=["updates", "custom"]):
             if mode == "custom":
-                manager.save(current_state, status="running", latest_node=latest_node, event={"mode": mode, "payload": event})
+                trace.record_custom_event(event)
+                saved = manager.save(current_state, status="running", latest_node=latest_node, event={"mode": mode, "payload": event})
+                if saved:
+                    trace.record_custom_event(saved)
                 yield {"type": "custom_event", "event": event}
             else:
                 latest_node = _latest_graph_node(event) or latest_node
                 _merge_graph_update(current_state, event)
-                manager.save(current_state, status="running", latest_node=latest_node, event={"mode": mode, "payload": event})
+                trace.record_graph_update(event)
+                saved = manager.save(current_state, status="running", latest_node=latest_node, event={"mode": mode, "payload": event})
+                if saved:
+                    trace.record_custom_event(saved)
                 yield {"type": "graph_event", "event": event}
     #Ctrl+C 中断时保存已收集的状态，并把保存结果交给界面显示。
     except KeyboardInterrupt:
         saved = manager.save(current_state, status="interrupted", latest_node=latest_node)
         if saved:
+            trace.record_custom_event(saved)
             yield {"type": "custom_event", "event": saved}
+        #中断也要结束 Trace，生成统计摘要和时间线。
+        trace_event = trace.end(status="interrupted", latest_node=latest_node, final_state=current_state)
+        if trace_event:
+            yield {"type": "custom_event", "event": trace_event}
         return
 
     #工作流正常结束后，记录完成状态。
     saved = manager.save(current_state, status="finished", latest_node=latest_node)
     if saved:
+        trace.record_custom_event(saved)
         yield {"type": "custom_event", "event": saved}
+    trace_event = trace.end(status="finished", latest_node=latest_node, final_state=current_state)
+    if trace_event:
+        yield {"type": "custom_event", "event": trace_event}
 
 
 def _env_int(name: str, default: int) -> int:

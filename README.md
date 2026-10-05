@@ -6,6 +6,18 @@
 
 <p align="center">逐文件阅读、重建一个 Agent，理解工具调用、任务调度与上下文管理。</p>
 
+## Trace 阶段更新
+
+已同步参考版本 `f92b8f0` 的运行链路记录。默认开启，可以通过 `--trace-mode off` 关闭：
+
+```powershell
+uv run Agent01 "你的任务" --trace-mode on
+```
+
+每次运行会在任务工作区的 `.Agent01/traces/<trace_id>/` 中记录 `events.jsonl`；正常完成或 Ctrl+C 中断后，生成统计文件 `summary.json` 和时间线 `timeline.md`。Trace 记录节点更新、工具调用和 Checkpoint 等事件，用于理解执行过程；恢复任务仍由 Checkpoint 负责。
+
+程序接口未指定模式时读取 `AGENT_TRACE_MODE`。当前版本 CLI 默认传入 `on`，从命令行关闭请显式使用 `--trace-mode off`。
+
 ## Checkpoint 阶段更新
 
 已接入参考版本 `340a3e3` 的进度保存和恢复功能。下方保留之前阶段的学习说明；工作区生命周期详见 [工作区说明](docs/workspace-lifecycle.md)。

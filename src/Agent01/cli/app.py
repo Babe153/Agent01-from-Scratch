@@ -56,6 +56,11 @@ def main(
         Literal["light", "strict", "off"],
         typer.Option("--checkpoint-mode", help="Checkpoint mode: light, strict, or off."),
     ] = "light",
+    #Trace 与 Checkpoint 独立开关，控制是否记录运行过程。
+    trace_mode: Annotated[
+        Literal["on", "off"],
+        typer.Option("--trace-mode", help="Trace logging mode: on or off."),
+    ] = "on",
     resume: Annotated[
         Path | None,
         typer.Option("--resume", help="Resume from an existing Agent01 workspace."),
@@ -79,6 +84,7 @@ def main(
         approval_handler=approval_handler,
         checkpoint_mode=checkpoint_mode,
         resume_workspace=resume,
+        trace_mode=trace_mode,
     ):
         #event 接收每次 yield 出来的事件 每当 stream_agent_events() 执行一次： yield 某个事件 这个事件就会赋给：event
         print_event(event) #formatter里面那个方法 真正接收event然后打印出来

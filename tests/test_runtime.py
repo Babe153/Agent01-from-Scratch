@@ -98,3 +98,127 @@ def test_stream_agent_events_saves_checkpoint_on_keyboard_interrupt(monkeypatch,
     assert any(event.get("type") == "custom_event" and event["event"].get("type") == "checkpoint_saved" for event in events)
     assert (tmp_path / ".Agent01" / "checkpoints" / "RECOVERY.md").exists()
     assert "plan" in (tmp_path / ".Agent01" / "checkpoints" / "RECOVERY.md").read_text(encoding="utf-8")
+
+
+def test_create_runtime_sets_trace_configuration(tmp_path: Path) -> None:
+    runtime = create_runtime(tmp_path / "workspace", trace_mode="off")
+
+    assert runtime.trace_mode == "off"
+
+
+def test_create_runtime_reads_trace_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AGENT_TRACE_MODE", "off")
+
+    runtime = create_runtime(tmp_path / "workspace", trace_mode=None)
+
+    assert runtime.trace_mode == "off"
+
+
+def test_stream_agent_events_writes_trace_summary_on_finish(monkeypatch, tmp_path: Path) -> None:
+    from Agent01.core.agent import stream_agent_events
+
+    class FakeWorkflow:
+        def stream(self, inputs, stream_mode):
+            yield ("custom", {"type": "tool_call", "node": "codeAgent", "name": "BashTool", "args": {"command": "true"}})
+            yield ("custom", {"type": "tool_result", "node": "codeAgent", "name": "BashTool", "result": {"ok": True}})
+            yield ("updates", {"final": {"final_answer": "LangGraph MultiAgent workflow finished: PASSED"}})
+
+    monkeypatch.setattr("Agent01.core.agent.build_workflow", lambda: FakeWorkflow())
+
+    events = list(
+        stream_agent_events(
+            "demo task",
+            workspace=tmp_path,
+            checkpoint_mode="off",
+            trace_mode="on",
+            approval_mode="deny",
+        )
+    )
+
+    trace_events = [event["event"] for event in events if event.get("type") == "custom_event" and event["event"].get("type") == "trace_summary"]
+    assert trace_events
+    assert trace_events[-1]["status"] == "finished"
+    assert trace_events[-1]["tool_calls"] == 1
+    assert (tmp_path / ".Agent01" / "traces").exists()
+
+
+def test_stream_agent_events_writes_trace_summary_on_keyboard_interrupt(monkeypatch, tmp_path: Path) -> None:
+    from Agent01.core.agent import stream_agent_events
+
+    class FakeWorkflow:
+        def stream(self, inputs, stream_mode):
+            yield ("updates", {"planner": {"plan_summary": "plan", "messages": []}})
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("Agent01.core.agent.build_workflow", lambda: FakeWorkflow())
+
+    events = list(
+        stream_agent_events(
+            "demo task",
+            workspace=tmp_path,
+            checkpoint_mode="off",
+            trace_mode="on",
+            approval_mode="deny",
+        )
+    )
+
+    trace_events = [event["event"] for event in events if event.get("type") == "custom_event" and event["event"].get("type") == "trace_summary"]
+    assert trace_events
+    assert trace_events[-1]["status"] == "interrupted"
+    assert trace_events[-1]["node_visits"] == {"planner": 1}
+
+
+def test_stream_agent_events_trace_off_creates_no_trace_dir(monkeypatch, tmp_path: Path) -> None:
+    from Agent01.core.agent import stream_agent_events
+
+    class FakeWorkflow:
+        def stream(self, inputs, stream_mode):
+            yield ("updates", {"final": {"final_answer": "PASSED"}})
+
+    monkeypatch.setattr("Agent01.core.agent.build_workflow", lambda: FakeWorkflow())
+
+    events = list(
+        stream_agent_events(
+            "demo task",
+            workspace=tmp_path,
+            checkpoint_mode="off",
+            trace_mode="off",
+            approval_mode="deny",
+        )
+    )
+
+    assert not any(event.get("type") == "custom_event" and event["event"].get("type") == "trace_summary" for event in events)
+    assert not (tmp_path / ".Agent01" / "traces").exists()
+
+
+def test_stream_agent_events_trace_records_resume(monkeypatch, tmp_path: Path) -> None:
+    from Agent01.core.agent import stream_agent_events
+    from Agent01.core.checkpoint import CheckpointManager
+    from Agent01.core.state import RuntimeState
+
+    class FakeWorkflow:
+        def stream(self, inputs, stream_mode):
+            yield ("updates", {"final": {"final_answer": "PASSED"}})
+
+    runtime = RuntimeState(workspace=tmp_path, checkpoint_mode="light")
+    CheckpointManager(runtime, task="original task").save(
+        {"task": "original task", "runtime": runtime, "messages": [], "max_attempts": 3},
+        status="interrupted",
+        latest_node="planner",
+    )
+    monkeypatch.setattr("Agent01.core.agent.build_workflow", lambda: FakeWorkflow())
+
+    list(
+        stream_agent_events(
+            workspace=tmp_path,
+            resume_workspace=tmp_path,
+            checkpoint_mode="off",
+            trace_mode="on",
+            approval_mode="deny",
+        )
+    )
+
+    events_files = list((tmp_path / ".Agent01" / "traces").glob("trace-*/events.jsonl"))
+    assert events_files
+    content = events_files[0].read_text(encoding="utf-8")
+    assert "checkpoint_resumed" in content

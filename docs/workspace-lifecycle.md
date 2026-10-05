@@ -26,6 +26,8 @@ workspace-20260522-213832-37ddbd/
    │  ├─ RECOVERY.md
    │  ├─ checkpoint.json
    │  └─ git/
+   ├─ traces/
+   │  └─ trace-*/
    └─ shims/
       ├─ pip
       ├─ pip3
@@ -77,6 +79,11 @@ flowchart TD
     Checkpoint --> CheckpointJson["checkpoint.json"]
     Checkpoint --> Git["checkpoints/git<br/>内部文件快照"]
     Checkpoint --> Strict["strict 模式:<br/>state.json / events.jsonl"]
+
+    Graph -.旁路观测.-> Trace["TraceRecorder"]
+    Trace --> TraceEvents["traces/trace-*/events.jsonl"]
+    Trace --> TraceSummary["summary.json"]
+    Trace --> TraceTimeline["timeline.md"]
 ```
 
 ## 一次任务的时间线
@@ -93,16 +100,19 @@ sequenceDiagram
     participant B as BashTool
     participant V as verifier
     participant K as Checkpoint
+    participant T as Trace
 
     U->>C: uv run Agent01 "查阅 GLM-5.1 HighSpeed 并做 HTML"
     C->>R: create_runtime()
     R->>R: 创建或复用 workspace
     C->>G: stream_agent_events()
     G->>K: 保存 started checkpoint
+    G->>T: 记录 run_start
 
     G->>P: planner_node
     P->>P: 生成 plan / todos / criteria / commands
     P->>K: 保存 running checkpoint
+    P->>T: 记录 graph update / tool event
 
     P->>S: CallSearchAgentTool
     S-->>P: research_notes + sources
@@ -120,8 +130,9 @@ sequenceDiagram
     V-->>G: passed = true
 
     G->>K: 保存 finished checkpoint
+    G->>T: 写 summary.json / timeline.md
     G->>C: final_answer
-    C-->>U: Rich 面板展示最终总结
+    C-->>U: Rich 面板展示最终总结和 Trace Summary
 ```
 
 ## 真实案例拆解
@@ -334,6 +345,37 @@ events.jsonl
 
 这个案例里没有该目录，说明没有启动后台服务。
 
+### .Agent01/traces/
+
+创建时机：`stream_agent_events()` 创建 `TraceRecorder` 后，第一次 `run_start` 写入时。
+
+默认 trace mode 是 `on`，每次运行会创建独立目录：
+
+```text
+.Agent01/traces/
+└─ trace-YYYYMMDD-HHMMSS-xxxxxx/
+   ├─ events.jsonl
+   ├─ summary.json
+   └─ timeline.md
+```
+
+用途：
+
+- `events.jsonl` 按顺序记录 run start/end、custom event、graph update、tool call/result、handoff、checkpoint 等结构化摘要。
+- `summary.json` 汇总节点访问次数、工具调用数、失败工具数、审批数、checkpoint 数、最终状态和 trace errors。
+- `timeline.md` 给人类快速扫一遍链路，不需要直接读 JSONL。
+
+Trace 和 checkpoint 的区别：
+
+- checkpoint 是为了恢复任务，回答“中断后怎么继续”。
+- trace 是为了观测任务，回答“这次运行发生了什么”。
+
+Trace 默认裁剪长 payload，避免把大段 tool output 或 graph state 全量写入日志。需要关闭时可以运行：
+
+```bash
+uv run Agent01 --trace-mode off "..."
+```
+
 ## light resume 怎么工作
 
 light checkpoint 的恢复不是“回到某个 tool call 的下一行继续跑”，而是“让模型带着恢复上下文重新进入 workflow”。
@@ -406,6 +448,7 @@ Agent01 把 Agent 放进更可控的执行环境：
 - bash-outputs 保存长输出。
 - background 支持长时服务。
 - checkpoint/resume 让中断后可以继续。
+- traces 保存结构化链路日志，方便教学演示和排障。
 
 这展示的是“Agent 不只是模型调用，外面的运行壳同样重要”。
 
@@ -417,6 +460,7 @@ Agent01 把 Agent 放进更可控的执行环境：
 2. 再打开 `glm5.1_highspeed.html`，看实际交付物。
 3. 再看 `.Agent01/checkpoints/RECOVERY.md`，理解系统如何总结进度。
 4. 再看 `.Agent01/checkpoints/checkpoint.json`，理解程序恢复需要的结构化信息。
-5. 最后看 `.Agent01/shims` 和 `.Agent01/bash-outputs`，理解 BashTool 的执行环境和输出管理。
+5. 再看 `.Agent01/traces/trace-*/timeline.md`，理解这次运行的节点和工具链路。
+6. 最后看 `.Agent01/shims` 和 `.Agent01/bash-outputs`，理解 BashTool 的执行环境和输出管理。
 
 这条路径基本对应了从“用户结果”到“Agent 运行机制”的逐层下钻。

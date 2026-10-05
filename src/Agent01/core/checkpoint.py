@@ -11,6 +11,13 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage, messages_from_dict, message_to_dict
 
+#demo/.Agent01/checkpoints/
+#├── checkpoint.json   # 任务摘要、进度、文件清单、Git 提交号
+#├── RECOVERY.md       # 根据上面的摘要生成的文字说明
+#├── git/              # 独立的 Git 仓库，保存工作区文件版本
+#├── state.json        # strict 才有：更完整的任务状态和消息
+#└── events.jsonl      # strict 有事件传入时：追加运行事件
+
 
 VALID_CHECKPOINT_MODES = {"light", "strict", "off"}
 CHECKPOINT_ROOT = Path(".Agent01") / "checkpoints"
